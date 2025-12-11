@@ -16,12 +16,31 @@ try:
         int8_gemm as triton_int8_gemm,
         int8_addmm as triton_int8_addmm,
         int8_gemm_quant as triton_int8_gemm_quant,
-        int8_addmm_quant as triton_int8_addmm_quant
+        int8_addmm_quant as triton_int8_addmm_quant,
+        int8_gemm_lodewise as triton_int8_gemm_lodewise
     )
     _HAS_TRITON_INT8 = True
 except ImportError:
     _HAS_TRITON_INT8 = False
     logging.warning("Triton INT8 kernels not available, using PyTorch fallback")
+
+# Try to import NF4/FP4 kernels
+try:
+    from kernels.nf4_kernels import (
+        quantize_4bit,
+        dequantize_4bit,
+        quantize_nf4,
+        dequantize_nf4,
+        quantize_fp4,
+        dequantize_fp4,
+        QuantState4bit,
+        pack_4bit,
+        unpack_4bit,
+    )
+    _HAS_NF4_KERNELS = True
+except ImportError:
+    _HAS_NF4_KERNELS = False
+    logging.warning("NF4/FP4 kernels not available")
 
 
 def register_layout_op(torch_op, layout_type):
@@ -704,6 +723,292 @@ class BlockWiseINT8Layout(QuantizedLayout):
         )
 
 
+# ==============================================================================
+# Block-Wise INT8 Lode-Wise Layout
+# ==============================================================================
+class BlockWiseINT8LayoutLodeWise(QuantizedLayout):
+    """
+    Block-wise INT8 quantization layout with Lode-Wise kernel access pattern.
+    
+    This layout uses per-row, per-K-block scaling for weights (different from
+    BlockWiseINT8Layout's 2D block grid).
+    
+    Storage format:
+    - qdata: INT8 tensor (torch.int8)
+    - scale: Per-block scaling factors (float32)
+      - For weights: shape (N, K//block_size) - per-row, column-block scales
+      - For activations: shape (*batch_dims, K//block_size)
+    - block_size: Size of quantization blocks (default 128)
+    - orig_dtype: Original dtype before quantization
+    - is_weight: Whether this is a weight tensor
+    """
+    
+    @classmethod
+    def quantize(cls, tensor, scale=None, block_size=128, is_weight=False, **kwargs):
+        """
+        Quantize a tensor to INT8 with Lode-Wise scale storage.
+        
+        For weights, scales are stored in row-major order: (N, K//block_size)
+        This allows efficient per-output-lane access in the kernel.
+        """
+        orig_dtype = tensor.dtype
+        
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+        
+        if is_weight:
+            # Weight quantization with Lode-Wise scale layout
+            assert tensor.dim() == 2, f"Weight tensor must be 2D, got shape {tensor.shape}"
+            N, K = tensor.shape
+            assert K % block_size == 0, \
+                f"K dimension must be divisible by block_size={block_size}, got K={K}"
+            
+            # Quantize per-block along K dimension for each output row
+            k_blocks = K // block_size
+            tensor_blocked = tensor.reshape(N, k_blocks, block_size)
+            
+            if scale is None:
+                # Compute per-block absolute maximum
+                amax = tensor_blocked.abs().amax(dim=-1)  # (N, k_blocks)
+                scale = amax / 127.0
+                scale = torch.maximum(scale, torch.tensor(1e-8, device=scale.device, dtype=scale.dtype))
+            
+            # Quantize
+            scale_broadcast = scale.unsqueeze(-1)  # (N, k_blocks, 1)
+            tensor_scaled = tensor_blocked / scale_broadcast
+            tensor_scaled = torch.clamp(tensor_scaled, -127.0, 127.0)
+            qdata = tensor_scaled.to(torch.int8).reshape(N, K)
+            
+        else:
+            # Activation quantization (same as BlockWiseINT8Layout)
+            K = tensor.shape[-1]
+            batch_shape = tensor.shape[:-1]
+            assert K % block_size == 0, \
+                f"Last dimension must be divisible by block_size={block_size}, got {K}"
+            
+            # Use Triton kernel if available AND tensor is on CUDA
+            if _HAS_TRITON_INT8 and tensor.is_cuda:
+                try:
+                    qdata, scale = triton_act_quant(tensor, block_size=block_size)
+                except Exception as e:
+                    logging.warning(f"Triton act_quant failed: {e}, falling back to PyTorch")
+                    qdata, scale = cls._activation_quantize_pytorch(tensor, block_size)
+            else:
+                qdata, scale = cls._activation_quantize_pytorch(tensor, block_size, scale)
+        
+        layout_params = {
+            'scale': scale.to(torch.float32),
+            'block_size': block_size,
+            'is_weight': is_weight,
+            'orig_dtype': orig_dtype
+        }
+        
+        return qdata, layout_params
+    
+    @staticmethod
+    def _activation_quantize_pytorch(tensor, block_size, scale=None):
+        """PyTorch fallback for activation quantization"""
+        K = tensor.shape[-1]
+        batch_shape = tensor.shape[:-1]
+        tensor_blocked = tensor.reshape(*batch_shape, K // block_size, block_size)
+        
+        if scale is None:
+            amax = tensor_blocked.abs().amax(dim=-1)
+            scale = amax / 127.0
+            scale = torch.maximum(scale, torch.tensor(1e-8, device=scale.device, dtype=scale.dtype))
+        
+        scale_broadcast = scale.unsqueeze(-1)
+        tensor_scaled = tensor_blocked / scale_broadcast
+        tensor_scaled = torch.clamp(tensor_scaled, -127.0, 127.0)
+        qdata = tensor_scaled.to(torch.int8).reshape(tensor.shape)
+        return qdata, scale
+    
+    @staticmethod
+    def dequantize(qdata, scale, block_size, is_weight=False, orig_dtype=None, output_dtype=None, **kwargs):
+        """
+        Dequantize INT8 tensor back to original precision.
+        """
+        if not qdata.is_contiguous():
+            qdata = qdata.contiguous()
+        if not scale.is_contiguous():
+            scale = scale.contiguous()
+        
+        if output_dtype is None:
+            output_dtype = orig_dtype if orig_dtype is not None else torch.get_default_dtype()
+        
+        if is_weight:
+            # Weight dequantization with Lode-Wise scale layout
+            N, K = qdata.shape
+            k_blocks = K // block_size
+            
+            # Scale shape should be (N, k_blocks)
+            if scale.shape != (N, k_blocks):
+                if scale.numel() == N * k_blocks:
+                    scale = scale.reshape(N, k_blocks)
+                else:
+                    raise RuntimeError(
+                        f"Weight scale shape mismatch: scale.shape={scale.shape}, expected ({N}, {k_blocks})"
+                    )
+            
+            qdata_blocked = qdata.reshape(N, k_blocks, block_size)
+            scale_broadcast = scale.unsqueeze(-1)
+            dequant = qdata_blocked.to(output_dtype) * scale_broadcast
+            dequant = dequant.reshape(N, K)
+        else:
+            # Activation dequantization
+            if _HAS_TRITON_INT8 and qdata.is_cuda:
+                try:
+                    return triton_act_dequant(qdata, scale, block_size=block_size, output_dtype=output_dtype)
+                except Exception as e:
+                    logging.warning(f"Triton act_dequant failed: {e}, falling back to PyTorch")
+            
+            batch_shape = qdata.shape[:-1]
+            K = qdata.shape[-1]
+            qdata_blocked = qdata.reshape(*batch_shape, K // block_size, block_size)
+            scale_broadcast = scale.unsqueeze(-1)
+            dequant = qdata_blocked.to(output_dtype) * scale_broadcast
+            dequant = dequant.reshape(qdata.shape)
+        
+        return dequant
+    
+    @classmethod
+    def get_plain_tensors(cls, qtensor):
+        """Extract raw tensors for computation."""
+        return (
+            qtensor._qdata,
+            qtensor._layout_params['scale'],
+            qtensor._layout_params['block_size'],
+            qtensor._layout_params['is_weight']
+        )
+
+
+# ==============================================================================
+# NF4 Layout (4-bit Normal Float)
+# ==============================================================================
+class NF4Layout(QuantizedLayout):
+    """
+    NF4 (Normal Float 4-bit) quantization layout.
+    
+    Uses a 16-value codebook derived from the normal distribution,
+    with block-wise scaling for precision.
+    
+    Storage format:
+    - qdata: Packed uint8 tensor (2 values per byte)
+    - absmax: Per-block absolute maximum values (float32)
+    - block_size: Size of quantization blocks (default 64)
+    - orig_dtype: Original dtype before quantization
+    - shape: Original tensor shape (for unpacking)
+    
+    Reference: QLoRA paper (https://arxiv.org/abs/2305.14314)
+    """
+    
+    @classmethod
+    def quantize(cls, tensor, block_size=64, compress_statistics=False, **kwargs):
+        """Quantize tensor to NF4 format."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("NF4 kernels not available")
+        
+        orig_dtype = tensor.dtype
+        original_shape = tensor.shape
+        packed, quant_state = quantize_nf4(tensor, block_size, compress_statistics)
+        
+        layout_params = {
+            'absmax': quant_state.absmax,
+            'block_size': block_size,
+            'orig_dtype': orig_dtype,
+            'shape': original_shape,
+            'quant_type': 'nf4',
+            'code': quant_state.code,
+        }
+        return packed, layout_params
+    
+    @staticmethod
+    def dequantize(qdata, absmax, block_size, orig_dtype, shape, code=None, **kwargs):
+        """Dequantize NF4 packed data back to float."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("NF4 kernels not available")
+        
+        from kernels.nf4_kernels import NF4_CODEBOOK
+        if code is None:
+            code = NF4_CODEBOOK.to(qdata.device)
+        
+        quant_state = QuantState4bit(
+            absmax=absmax, shape=shape, code=code,
+            blocksize=block_size, quant_type='nf4', dtype=orig_dtype,
+        )
+        return dequantize_nf4(qdata, quant_state, orig_dtype)
+    
+    @classmethod
+    def get_plain_tensors(cls, qtensor):
+        """Extract raw tensors for computation."""
+        return (
+            qtensor._qdata,
+            qtensor._layout_params['absmax'],
+            qtensor._layout_params['block_size'],
+            qtensor._layout_params['shape'],
+        )
+
+
+# ==============================================================================
+# FP4 Layout (4-bit Floating Point)
+# ==============================================================================
+class FP4Layout(QuantizedLayout):
+    """
+    FP4 (Floating Point 4-bit) quantization layout.
+    
+    Uses a 16-value codebook representing a hardware-inspired
+    4-bit floating point format.
+    """
+    
+    @classmethod
+    def quantize(cls, tensor, block_size=64, compress_statistics=False, **kwargs):
+        """Quantize tensor to FP4 format."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("FP4 kernels not available")
+        
+        orig_dtype = tensor.dtype
+        original_shape = tensor.shape
+        packed, quant_state = quantize_fp4(tensor, block_size, compress_statistics)
+        
+        layout_params = {
+            'absmax': quant_state.absmax,
+            'block_size': block_size,
+            'orig_dtype': orig_dtype,
+            'shape': original_shape,
+            'quant_type': 'fp4',
+            'code': quant_state.code,
+        }
+        return packed, layout_params
+    
+    @staticmethod
+    def dequantize(qdata, absmax, block_size, orig_dtype, shape, code=None, **kwargs):
+        """Dequantize FP4 packed data back to float."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("FP4 kernels not available")
+        
+        from kernels.nf4_kernels import FP4_CODEBOOK_NORMALIZED
+        if code is None:
+            code = FP4_CODEBOOK_NORMALIZED.to(qdata.device)
+        
+        quant_state = QuantState4bit(
+            absmax=absmax, shape=shape, code=code,
+            blocksize=block_size, quant_type='fp4', dtype=orig_dtype,
+        )
+        return dequantize_fp4(qdata, quant_state, orig_dtype)
+    
+    @classmethod
+    def get_plain_tensors(cls, qtensor):
+        """Extract raw tensors for computation."""
+        return (
+            qtensor._qdata,
+            qtensor._layout_params['absmax'],
+            qtensor._layout_params['block_size'],
+            qtensor._layout_params['shape'],
+        )
+
+
+# Note: group_size here is a fallback if per-tensor .comfy_quant metadata doesn't specify it.
+# Prefer always storing group_size in per-tensor metadata during conversion.
 QUANT_ALGOS = {
     "float8_e4m3fn": {
         "storage_t": torch.float8_e4m3fn,
@@ -714,14 +1019,36 @@ QUANT_ALGOS = {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "BlockWiseINT8Layout",
-        "group_size": 128,  # Default block size,
+        "group_size": 128,  # Fallback if per-tensor metadata missing
         "asymmetric_layout": True,
+    },
+    "int8_lodewise": {
+        "storage_t": torch.int8,
+        "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "BlockWiseINT8LayoutLodeWise",
+        "group_size": 128,  # Fallback if per-tensor metadata missing
+        "asymmetric_layout": True,
+    },
+    "bnb_nf4": {
+        "storage_t": torch.uint8,
+        "parameters": {"absmax"},
+        "comfy_tensor_layout": "NF4Layout",
+        "group_size": 64,  # Fallback if per-tensor metadata missing
+    },
+    "bnb_fp4": {
+        "storage_t": torch.uint8,
+        "parameters": {"absmax"},
+        "comfy_tensor_layout": "FP4Layout",
+        "group_size": 64,  # Fallback if per-tensor metadata missing
     },
 }
 
 LAYOUTS = {
     "TensorCoreFP8Layout": TensorCoreFP8Layout,
     "BlockWiseINT8Layout": BlockWiseINT8Layout,
+    "BlockWiseINT8LayoutLodeWise": BlockWiseINT8LayoutLodeWise,
+    "NF4Layout": NF4Layout,
+    "FP4Layout": FP4Layout,
 }
 
 

@@ -101,7 +101,7 @@ python convert_to_quant.py \
 | `-o`, `--output` | Auto-generated | Output file path. If not specified, generates a descriptive filename |
 | `--comfy_quant` | False | Enable ComfyUI-compatible quantization format (adds `.comfy_quant` metadata) |
 | `--int8` | False | Use INT8 block-wise quantization instead of FP8 |
-| `--kernel_backend` | `triton` | Kernel backend for INT8 quantization: `triton` (quant_ops.py) or `triton_v2` (int8_matmul.py with autotuning) |
+| `--kernel_backend` | `blockwise` | Kernel backend for INT8 quantization: `blockwise` (2D tile-level scales) or `lodewise` (per-output-lane scales) |
 | `--full_precision_matrix_mult` | False | Add `full_precision_matrix_mult=True` to `.comfy_quant` metadata |
 
 ### Quantization Options
@@ -287,12 +287,12 @@ This preserves the most important weight matrix structure while allowing roundin
 
 When using `--int8`, you can choose between two Triton kernel backends:
 
-| Backend | Source | Block Sizes | Autotuning | Notes |
-|---------|--------|-------------|------------|-------|
-| `triton` (default) | `quant_ops.py` | Fixed | No | Stable, well-tested |
-| `triton_v2` | `kernels/int8_matmul.py` | 16-64 | Yes | Experimental, may perform better on some hardware |
+| Backend | Description | Block Sizes | Autotuning | Notes |
+|---------|-------------|-------------|------------|-------|
+| `blockwise` (default) | 2D tile-level weight scales | Fixed 128x128 | No | Stable, well-tested, matches `BlockWiseINT8Layout` |
+| `lodewise` | Per-output-lane weight scales | 16-64 | Yes | Smaller tiles, autotuned, may perform better on some hardware |
 
-**When to use `triton_v2`:**
+**When to use `lodewise`:**
 - Experimenting with different kernel configurations
 - Smaller matrices where autotuning may find better block sizes
 - AB testing against the default backend
@@ -302,11 +302,11 @@ When using `--int8`, you can choose between two Triton kernel backends:
 python convert_to_quant.py \
     -i model.safetensors \
     --int8 \
-    --kernel_backend triton_v2 \
+    --kernel_backend lodewise \
     --comfy_quant
 ```
 
-**Note:** If `triton_v2` is requested but unavailable (e.g., missing Triton installation), the script will error with a fallback command suggestion.
+**Note:** If `lodewise` is requested but unavailable (e.g., missing Triton installation), the script will error with a fallback command suggestion.
 
 ---
 

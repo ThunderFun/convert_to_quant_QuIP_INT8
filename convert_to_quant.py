@@ -11,17 +11,31 @@ import math
 import json
 from torch.optim import AdamW, RAdam
 from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
-from quant_ops import BlockWiseINT8Layout
+from quant_ops import BlockWiseINT8Layout, BlockWiseINT8LayoutLodeWise
 
-# Triton V2 kernels (alternative INT8 quantization backend)
+# NF4/FP4 kernels
 try:
-    from kernels.int8_matmul import (
-        weight_quant as triton_v2_weight_quant,
-        weight_dequant as triton_v2_weight_dequant,
+    from kernels.nf4_kernels import (
+        quantize_nf4,
+        dequantize_nf4,
+        quantize_fp4,
+        dequantize_fp4,
+        QuantState4bit,
     )
-    _HAS_TRITON_V2 = True
+    _HAS_NF4 = True
 except ImportError:
-    _HAS_TRITON_V2 = False
+    _HAS_NF4 = False
+
+# Lode-Wise INT8 kernels (alternative INT8 quantization backend with per-output-lane scale access)
+try:
+    from kernels.int8_kernels import (
+        weight_quant as lodewise_weight_quant,
+        weight_dequant as lodewise_weight_dequant,
+        int8_gemm_lodewise,
+    )
+    _HAS_LODEWISE = True
+except ImportError:
+    _HAS_LODEWISE = False
 
 # --- Constants and Configuration ---
 torch.set_printoptions(precision=8)
@@ -71,18 +85,26 @@ def create_comfy_quant_tensor(format_type: str, block_size: Optional[int] = None
     Create a .comfy_quant tensor for ComfyUI quantization metadata.
     
     Args:
-        format_type: Either "float8_e4m3fn" or "int8_blockwise"
-        block_size: Block/group size for quantization (required for int8_blockwise)
+        format_type: One of "float8_e4m3fn", "int8_blockwise", "int8_lodewise", "bnb_nf4", or "bnb_fp4"
+        block_size: Block/group size for quantization (required for block-based formats)
         full_precision_matrix_mult: If True, adds "full_precision_matrix_mult": True to metadata.
                                     If False or None, this key is omitted entirely.
     
     Returns:
         torch.uint8 tensor containing JSON-encoded metadata
+    
+    Note: ComfyUI's ops.py reads group_size from layer_conf["params"]["group_size"],
+    so we must nest it inside a "params" sub-object.
     """
     comfy_quant = {"format": format_type}
     
-    if format_type == "int8_blockwise" and block_size is not None:
-        comfy_quant["group_size"] = block_size
+    # Build params sub-object - ComfyUI ops.py reads from layer_conf["params"]["group_size"]
+    params = {}
+    if block_size is not None and format_type in ("int8_blockwise", "int8_lodewise", "bnb_nf4", "bnb_fp4"):
+        params["group_size"] = block_size
+    
+    if params:
+        comfy_quant["params"] = params
     
     if full_precision_matrix_mult is True:
         comfy_quant["full_precision_matrix_mult"] = True
@@ -152,19 +174,20 @@ class LearnedRoundingConverter:
         self.kernel_backend = kernel_backend
         self.optimizer_kwargs = kwargs
         
-        # INT8 always uses block-wise scaling
-        if target_format == 'int8':
+        # INT8 and 4-bit always use block-wise scaling
+        if target_format in ('int8', 'nf4', 'fp4'):
             scaling_mode = 'block'
         self.scaling_mode = scaling_mode
         
-        # Set format-specific max values
+        # Set format-specific max values and dtype
         if self.target_format == 'int8':
             # INT8 uses integer symmetric range [-127, 127]
-            # Note: quant_max_val is not used in INT8 path - BlockWiseINT8Layout handles quantization
             self.target_dtype = TARGET_INT8_DTYPE
-            # INT8 uses BlockWiseINT8Layout which computes: scale = amax / 127.0
-            # The 127 is used directly as integer, not converted to float for max comparison
             self.f8_max_val = None  # Not applicable to INT8
+        elif self.target_format in ('nf4', 'fp4'):
+            # 4-bit quantization uses uint8 for packed storage (2 values per byte)
+            self.target_dtype = torch.uint8
+            self.f8_max_val = None  # Not applicable to 4-bit
         else:
             # FP8 uses floating point range constants
             self.target_dtype = TARGET_FP8_DTYPE
@@ -432,12 +455,20 @@ class LearnedRoundingConverter:
         if self.target_format == 'int8':
             return self._convert_int8(W_float32)
         
+        # NF4 quantization path
+        if self.target_format == 'nf4':
+            return self._convert_nf4(W_float32)
+        
+        # FP4 quantization path
+        if self.target_format == 'fp4':
+            return self._convert_fp4(W_float32)
+        
         # FP8 quantization path (original behavior)
         return self._convert_fp8(W_float32)
 
     def _convert_int8(self, W_float32: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        INT8 block-wise quantization using BlockWiseINT8Layout or triton_v2 kernels.
+        INT8 block-wise quantization using BlockWiseINT8Layout or Lode-Wise kernels.
         
         INT8 block-wise quantization differs from FP8:
         - Uses symmetric quantization with range [-127, 127]
@@ -454,11 +485,16 @@ class LearnedRoundingConverter:
             )
         
         # Select quantization backend
-        if self.kernel_backend == 'triton_v2':
-            # Use triton_v2 kernels from int8_matmul.py
-            qdata, scale = triton_v2_weight_quant(W_float32, block_size=self.block_size)
+        if self.kernel_backend == 'lodewise':
+            # Use BlockWiseINT8LayoutLodeWise for per-row scale format (N, K//block_size)
+            qdata, layout_params = BlockWiseINT8LayoutLodeWise.quantize(
+                W_float32,
+                block_size=self.block_size,
+                is_weight=True
+            )
+            scale = layout_params['scale']  # Shape: (N, K//block_size)
         else:
-            # Use BlockWiseINT8Layout (default 'triton' backend from quant_ops.py)
+            # Use BlockWiseINT8Layout (default 'blockwise' backend from quant_ops.py)
             qdata, layout_params = BlockWiseINT8Layout.quantize(
                 W_float32,
                 block_size=self.block_size,
@@ -472,8 +508,10 @@ class LearnedRoundingConverter:
             qdata, scale = self._optimize_int8_learned_rounding(W_float32, qdata, scale)
         
         # Dequantize to get the reconstructed weight for bias correction
-        if self.kernel_backend == 'triton_v2':
-            dequantized_weight = triton_v2_weight_dequant(qdata, scale, block_size=self.block_size, output_dtype=COMPUTE_DTYPE)
+        if self.kernel_backend == 'lodewise':
+            dequantized_weight = BlockWiseINT8LayoutLodeWise.dequantize(
+                qdata, scale, self.block_size, is_weight=True, orig_dtype=COMPUTE_DTYPE
+            )
         else:
             dequantized_weight = BlockWiseINT8Layout.dequantize(
                 qdata, scale, self.block_size, is_weight=True, orig_dtype=COMPUTE_DTYPE
@@ -803,6 +841,69 @@ class LearnedRoundingConverter:
         del qdata_float, q_refined
         return final_qdata
 
+    def _convert_nf4(self, W_float32: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        NF4 (4-bit Normal Float) quantization using codebook-based quantization.
+        
+        NF4 uses a 16-value codebook derived from the normal distribution,
+        with block-wise scaling for precision.
+        
+        Returns:
+            Tuple of (packed_qdata, absmax, dequantized_weight)
+            - packed_qdata: uint8 tensor with 2 values per byte
+            - absmax: per-block absolute maximum scales
+            - dequantized_weight: reconstructed weight for bias correction
+        """
+        if not _HAS_NF4:
+            raise RuntimeError("NF4 kernels not available. Check kernels/nf4_kernels.py")
+        
+        M, N = W_float32.shape
+        print(f"    - NF4 quantization with block_size={self.block_size}")
+        
+        # Quantize using NF4 kernels
+        packed, quant_state = quantize_nf4(W_float32, self.block_size, compress_statistics=False)
+        
+        # Dequantize for bias correction
+        dequantized_weight = dequantize_nf4(packed, quant_state, output_dtype=COMPUTE_DTYPE)
+        
+        # Clean up
+        del W_float32
+        gc.collect()
+        if self.device == 'cuda':
+            torch.cuda.empty_cache()
+        
+        return packed, quant_state.absmax.to(device=self.device, dtype=SCALE_DTYPE), dequantized_weight
+
+    def _convert_fp4(self, W_float32: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        FP4 (4-bit Floating Point) quantization using codebook-based quantization.
+        
+        FP4 uses a 16-value codebook representing a hardware-inspired
+        4-bit floating point format.
+        
+        Returns:
+            Tuple of (packed_qdata, absmax, dequantized_weight)
+        """
+        if not _HAS_NF4:
+            raise RuntimeError("FP4 kernels not available. Check kernels/nf4_kernels.py")
+        
+        M, N = W_float32.shape
+        print(f"    - FP4 quantization with block_size={self.block_size}")
+        
+        # Quantize using FP4 kernels
+        packed, quant_state = quantize_fp4(W_float32, self.block_size, compress_statistics=False)
+        
+        # Dequantize for bias correction
+        dequantized_weight = dequantize_fp4(packed, quant_state, output_dtype=COMPUTE_DTYPE)
+        
+        # Clean up
+        del W_float32
+        gc.collect()
+        if self.device == 'cuda':
+            torch.cuda.empty_cache()
+        
+        return packed, quant_state.absmax.to(device=self.device, dtype=SCALE_DTYPE), dequantized_weight
+
     def _convert_fp8(self, W_float32: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Original FP8 quantization path."""
 
@@ -914,14 +1015,28 @@ def convert_to_fp8_scaled(
     input_file: str, output_file: str, comfy_quant: bool, t5xxl: bool, distillation_large: bool,
     distillation_small: bool, nerf_large: bool, nerf_small: bool,
     radiance: bool, wan: bool, qwen: bool, hunyuan: bool, zimage_l: bool, zimage_s: bool, calib_samples: int, seed: int,
-    int8: bool = False, full_precision_matrix_mult: bool = False, skip_inefficient_layers: bool = False,
+    int8: bool = False, nf4: bool = False, fp4: bool = False,
+    full_precision_matrix_mult: bool = False, skip_inefficient_layers: bool = False,
     include_input_scale: bool = False, no_learned_rounding: bool = False,
     **converter_kwargs
 ):
-    # Determine target format
-    target_format = 'int8' if int8 else 'fp8'
-    target_dtype = TARGET_INT8_DTYPE if int8 else TARGET_FP8_DTYPE
-    format_name = "INT8" if int8 else "FP8"
+    # Determine target format (priority: nf4 > fp4 > int8 > fp8)
+    if nf4:
+        target_format = 'nf4'
+        target_dtype = torch.uint8
+        format_name = "NF4"
+    elif fp4:
+        target_format = 'fp4'
+        target_dtype = torch.uint8
+        format_name = "FP4"
+    elif int8:
+        target_format = 'int8'
+        target_dtype = TARGET_INT8_DTYPE
+        format_name = "INT8"
+    else:
+        target_format = 'fp8'
+        target_dtype = TARGET_FP8_DTYPE
+        format_name = "FP8"
     
     print(f"Processing: {input_file}\nOutput will be saved to: {output_file}")
     print("-" * 60)
@@ -956,6 +1071,10 @@ def convert_to_fp8_scaled(
     # Add target_format and no_learned_rounding to converter kwargs
     converter_kwargs['target_format'] = target_format
     converter_kwargs['no_learned_rounding'] = no_learned_rounding
+    
+    # Extract kernel_backend for comfy_quant format (default to 'blockwise')
+    kernel_backend = converter_kwargs.get('kernel_backend', 'blockwise')
+    
     converter = LearnedRoundingConverter(**converter_kwargs)
     block_size = converter_kwargs.get('block_size', 64)
 
@@ -1045,18 +1164,28 @@ def convert_to_fp8_scaled(
         bias_key = f"{base_name}.bias"
         
         if comfy_quant is True:
-            new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
-            
-            # Create appropriate comfy_quant tensor based on format
-            if int8:
+            # Use appropriate scale key name based on format
+            if nf4 or fp4:
+                # 4-bit formats use absmax instead of weight_scale
+                new_tensors[f"{base_name}.absmax"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 comfy_quant_tensor = create_comfy_quant_tensor(
-                    "int8_blockwise", 
+                    "bnb_nf4" if nf4 else "bnb_fp4",
+                    block_size=block_size,
+                    full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
+                )
+            elif int8:
+                new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
+                # Use int8_blockwise or int8_lodewise based on kernel_backend
+                int8_format = "int8_lodewise" if kernel_backend == "lodewise" else "int8_blockwise"
+                comfy_quant_tensor = create_comfy_quant_tensor(
+                    int8_format, 
                     block_size=block_size,
                     full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
                 )
                 # Add input_scale placeholder for INT8 (required by ComfyUI)
                 new_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=SCALE_DTYPE, device='cpu')
             else:
+                new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 comfy_quant_tensor = create_comfy_quant_tensor(
                     "float8_e4m3fn",
                     full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
@@ -1133,8 +1262,10 @@ def main():
     parser.add_argument("-o", "--output", type=str, help="Output safetensors file path. Auto-generated if not provided.")
     parser.add_argument("--comfy_quant", action='store_true', help="Use Comfy quantization method.")
     parser.add_argument("--int8", action='store_true', help="Use INT8 block-wise quantization instead of FP8.")
-    parser.add_argument("--kernel_backend", type=str, default="triton", choices=["triton", "triton_v2"],
-                        help="Kernel backend for INT8 quantization. 'triton' uses quant_ops.py, 'triton_v2' uses kernels/int8_matmul.py with autotuned kernels.")
+    parser.add_argument("--nf4", action='store_true', help="Use NF4 (4-bit Normal Float) quantization.")
+    parser.add_argument("--fp4", action='store_true', help="Use FP4 (4-bit Floating Point) quantization.")
+    parser.add_argument("--kernel_backend", type=str, default="blockwise", choices=["blockwise", "lodewise"],
+                        help="Kernel backend for INT8 quantization. 'blockwise' uses BlockWiseINT8Layout (2D tile-level scales), 'lodewise' uses Lode-Wise kernels (per-output-lane scales).")
     parser.add_argument("--simple", action='store_true', help="Skip SVD optimization, use simple quantization.")
     parser.add_argument("--full_precision_matrix_mult", action='store_true', help="Add full_precision_matrix_mult=True to .comfy_quant metadata.")
     parser.add_argument("--heur", action='store_true', help="Skip layers with poor quantization characteristics (aspect ratio, size).")
@@ -1168,12 +1299,12 @@ def main():
         print(f"Error: Input file not found: {args.input}")
         return
 
-    # Check triton_v2 kernel backend availability
-    if args.kernel_backend == 'triton_v2' and not _HAS_TRITON_V2:
-        print("ERROR: triton_v2 kernel backend requested but not available.")
+    # Check lodewise kernel backend availability
+    if args.kernel_backend == 'lodewise' and not _HAS_LODEWISE:
+        print("ERROR: lodewise kernel backend requested but not available.")
         print("       The kernels/int8_matmul.py module could not be imported.")
         print("")
-        print("Fallback command: Remove '--kernel_backend triton_v2' or use '--kernel_backend triton'")
+        print("Fallback command: Remove '--kernel_backend lodewise' or use '--kernel_backend blockwise'")
         sys.exit(1)
 
     # Only check FP8 support if not using INT8
@@ -1186,7 +1317,13 @@ def main():
 
     if not args.output:
         base = os.path.splitext(args.input)[0]
-        if args.int8:
+        if args.nf4:
+            format_str = "bnb_nf4"
+            scaling_str = f"_bs{args.block_size}"
+        elif args.fp4:
+            format_str = "bnb_fp4"
+            scaling_str = f"_bs{args.block_size}"
+        elif args.int8:
             format_str = "int8_blockwise"
             scaling_str = f"_bs{args.block_size}"
         else:
@@ -1207,7 +1344,7 @@ def main():
     # Separate converter kwargs from function kwargs
     excluded_keys = ['input', 'output', 'comfy_quant', 't5xxl', 'distillation_large', 'distillation_small', 
                      'nerf_large', 'nerf_small', 'radiance', 'wan', 'qwen', 'hunyuan', 'zimage_l', 'zimage_s', 
-                     'calib_samples', 'manual_seed', 'int8', 'full_precision_matrix_mult', 'heur',
+                     'calib_samples', 'manual_seed', 'int8', 'nf4', 'fp4', 'full_precision_matrix_mult', 'heur',
                      'input_scale', 'simple']
     converter_kwargs = {k: v for k, v in vars(args).items() if k not in excluded_keys}
 
@@ -1215,7 +1352,8 @@ def main():
         args.input, output_file, args.comfy_quant, args.t5xxl, args.distillation_large,
         args.distillation_small, args.nerf_large, args.nerf_small,
         args.radiance, args.wan, args.qwen, args.hunyuan, args.zimage_l, args.zimage_s, args.calib_samples, seed,
-        int8=args.int8, full_precision_matrix_mult=args.full_precision_matrix_mult,
+        int8=args.int8, nf4=args.nf4, fp4=args.fp4,
+        full_precision_matrix_mult=args.full_precision_matrix_mult,
         skip_inefficient_layers=args.heur,
         include_input_scale=args.input_scale,
         no_learned_rounding=args.simple,

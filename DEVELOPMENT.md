@@ -1,0 +1,97 @@
+# Development Log
+
+## 2025-12-11: NF4/FP4 Quantization Implementation & INT8 Lodewise Fix
+
+### Session Summary
+Implemented bitsandbytes-style 4-bit quantization (NF4/FP4) and fixed a critical scale shape mismatch bug in INT8 lodewise quantization.
+
+---
+
+### New Files Created
+
+| File | Description |
+|------|-------------|
+| `kernels/nf4_kernels.py` | Core 4-bit quantization kernels with NF4/FP4 codebooks, packing utilities, and quant/dequant functions |
+| `ComfyUI/comfy/nf4_kernels.py` | Copy of kernel file for ComfyUI integration |
+
+---
+
+### Files Modified
+
+#### `quant_ops.py` (convert_to_quant workspace)
+- Added `NF4Layout` and `FP4Layout` classes implementing `QuantizedLayout` interface
+- Added `bnb_nf4` and `bnb_fp4` entries to `QUANT_ALGOS` dictionary
+- Registered layouts in `LAYOUTS` dictionary
+- **Fixed `BlockWiseINT8LayoutLodeWise`**: Changed from delegating to `BlockWiseINT8Layout` to implementing proper per-row scaling `(N, K//block_size)` format
+
+#### `ComfyUI/comfy/quant_ops.py`
+- Added NF4/FP4 kernel imports
+- Added `NF4Layout` and `FP4Layout` classes
+- Added `bnb_nf4` and `bnb_fp4` entries to `QUANT_ALGOS` and `LAYOUTS`
+
+#### `convert_to_quant.py`
+- Added CLI arguments: `--nf4`, `--fp4`
+- Added `_convert_nf4()` and `_convert_fp4()` methods to `LearnedRoundingConverter`
+- Updated `convert()` method routing for NF4/FP4 formats
+- Updated format detection in `convert_to_fp8_scaled()` with priority: nf4 > fp4 > int8 > fp8
+- Updated comfy_quant tensor creation to use `bnb_nf4`/`bnb_fp4` format names and `absmax` scale key
+- Updated output filename generation for NF4/FP4
+- **Fixed `_convert_int8()`**: Changed from using `lodewise_weight_quant` (incorrect) to `BlockWiseINT8LayoutLodeWise.quantize` (correct per-row format)
+- Cleaned up unused imports (`NF4Layout`, `FP4Layout`)
+
+#### `AGENTS.md`
+- Added "bitsandbytes Integration Scope" section with guidelines
+
+---
+
+### Bug Fixes
+
+#### INT8 Lodewise Scale Shape Mismatch
+**Symptom:** `RuntimeError: Weight scale shape mismatch: scale.shape=torch.Size([90, 30]), expected (11520, 30)`
+
+**Root Cause:** 
+- Conversion script was using `lodewise_weight_quant` which was just an alias for `weight_quant`
+- `weight_quant` produces scales with shape `(M//block_size, N//block_size)` (2D block grid)
+- ComfyUI's `BlockWiseINT8LayoutLodeWise.dequantize` expected `(N, K//block_size)` (per-row)
+
+**Fix:**
+1. Updated `BlockWiseINT8LayoutLodeWise.quantize` in workspace `quant_ops.py` to produce per-row scales
+2. Changed `_convert_int8()` to use `BlockWiseINT8LayoutLodeWise.quantize/dequantize` for lodewise backend
+
+---
+
+### Usage
+
+```bash
+# NF4 quantization
+python convert_to_quant.py -i model.safetensors --nf4 --comfy_quant
+
+# FP4 quantization  
+python convert_to_quant.py -i model.safetensors --fp4 --comfy_quant
+
+# INT8 lodewise (now fixed)
+python convert_to_quant.py -i model.safetensors --int8 --kernel_backend lodewise --comfy_quant
+```
+
+---
+
+### Technical Notes
+
+#### NF4 Codebook (from QLoRA paper)
+16 values optimized for normal distribution:
+```
+[-1.0, -0.696, -0.525, -0.395, -0.284, -0.185, -0.091, 0.0,
+  0.080, 0.161, 0.246, 0.338, 0.441, 0.563, 0.723, 1.0]
+```
+
+#### 4-bit Storage Format
+- Packed `uint8`: 2 values per byte (4 bits each)
+- `absmax`: per-block absolute maximum for scaling
+- Default block size: 64
+
+#### Scale Shape Conventions
+| Layout | Weight Scale Shape |
+|--------|-------------------|
+| `BlockWiseINT8Layout` | `(M//block_size, N//block_size)` |
+| `BlockWiseINT8LayoutLodeWise` | `(N, K//block_size)` |
+| `NF4Layout` / `FP4Layout` | `(num_blocks,)` where `num_blocks = numel // block_size` |
