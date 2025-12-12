@@ -162,7 +162,7 @@ class LearnedRoundingConverter:
     Provides a highly effective optimization strategy.
     Supports both FP8 and INT8 quantization formats.
     """
-    def __init__(self, optimizer="original", num_iter=500, top_p=0.01, min_k=1, max_k=16, scaling_mode='tensor', block_size=64, full_matrix=False, target_format='fp8', no_learned_rounding=False, kernel_backend='triton', **kwargs):
+    def __init__(self, optimizer="original", num_iter=500, top_p=0.01, min_k=1, max_k=16, scaling_mode='tensor', block_size=64, full_matrix=False, target_format='fp8', no_learned_rounding=False, kernel_backend='triton', lr_schedule='adaptive', lr_gamma=0.99, lr_patience=50, lr_factor=0.5, **kwargs):
         self.num_iter = num_iter
         self.top_p = top_p
         self.min_k = min_k
@@ -175,6 +175,12 @@ class LearnedRoundingConverter:
         self.no_learned_rounding = no_learned_rounding
         self.kernel_backend = kernel_backend
         self.optimizer_kwargs = kwargs
+        
+        # LR schedule configuration (for 'original' optimizer)
+        self.lr_schedule = lr_schedule
+        self.lr_gamma = lr_gamma
+        self.lr_patience = lr_patience
+        self.lr_factor = lr_factor
         
         # INT8 and 4-bit always use block-wise scaling
         if target_format in ('int8', 'nf4', 'fp4'):
@@ -198,6 +204,8 @@ class LearnedRoundingConverter:
         print(f"LearnedRoundingConverter initialized on device: {self.device}")
         print(f"  - Target format: {self.target_format}")
         print(f"  - Using optimizer: '{self.optimizer_choice}'" + (" (disabled - simple quant)" if self.no_learned_rounding else ""))
+        if self.optimizer_choice == 'original':
+            print(f"  - LR schedule: {self.lr_schedule}")
         print(f"  - Scaling mode: {self.scaling_mode}")
         if self.scaling_mode == 'block':
             print(f"    - Block size: {self.block_size}")
@@ -320,13 +328,15 @@ class LearnedRoundingConverter:
         best_loss = float('inf')
         best_tensor = None
         worse_loss_counter = 0
+        plateau_counter = 0  # For plateau schedule
         curr_lr = self.optimizer_kwargs.get('lr', 0.5)
         if W_float32.shape[0] == W_float32.shape[1]:
             small_mult = 0.95
         else:
             small_mult = 1.0
 
-        pbar = tqdm(range(self.num_iter), desc="    Optimizing (Original)", leave=False, dynamic_ncols=True)
+        schedule_name = self.lr_schedule
+        pbar = tqdm(range(self.num_iter), desc=f"    Optimizing (Original-{schedule_name})", leave=False, dynamic_ncols=True)
         for i in pbar:
             with torch.no_grad():
                 current_dq = W_q_refined / scale
@@ -334,90 +344,41 @@ class LearnedRoundingConverter:
                 projected_error = U_k.T @ error @ Vh_k.T
                 loss = torch.linalg.norm(projected_error)
 
-            if loss.item() < best_loss and worse_loss_counter < 50:
-                best_loss = loss.item()
+            current_loss = loss.item()
+            improved = current_loss < best_loss
+
+            if improved:
+                best_loss = current_loss
                 best_tensor = W_q_refined.clone()
                 worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.25 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 49 and worse_loss_counter < 75:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.375 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 74 and worse_loss_counter < 100:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.5 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 99 and worse_loss_counter < 125:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.75 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 124 and worse_loss_counter < 150:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (2.0 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 149 and worse_loss_counter < 200:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (2.25 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 199 and worse_loss_counter < 250:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (2.5 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 249 and worse_loss_counter < 300:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (2.75 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 299:
-                best_loss = loss.item()
-                best_tensor = W_q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (3.0 * small_mult), 100.0)
-            elif loss.item() > best_loss and worse_loss_counter < 26:
+                plateau_counter = 0
+            else:
                 worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.95 * small_mult), 9e-8)
-            elif worse_loss_counter > 25 and worse_loss_counter < 51:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.97 * small_mult), 8e-8)
-            elif worse_loss_counter > 50 and worse_loss_counter < 76:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.985 * small_mult), 7e-8)
-            elif worse_loss_counter > 75 and worse_loss_counter < 101:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.9875 * small_mult), 6e-8)
-            elif worse_loss_counter > 100 and worse_loss_counter < 151:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.98875 * small_mult), 5e-8)
-            elif worse_loss_counter > 150 and worse_loss_counter < 201:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.99 * small_mult), 4e-8)
-            elif worse_loss_counter > 200 and worse_loss_counter < 251:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.99125 * small_mult), 3e-8)
-            elif worse_loss_counter > 250 and worse_loss_counter < 301:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.9925 * small_mult), 2e-8)
-            elif worse_loss_counter > 300:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.995 * small_mult), 5e-9)
+                plateau_counter += 1
+
+            # LR update based on schedule
+            if schedule_name == 'exponential':
+                # ExponentialLR: lr = lr * gamma per step
+                curr_lr = max(curr_lr * self.lr_gamma, 1e-8)
+            elif schedule_name == 'plateau':
+                # ReduceLROnPlateau: reduce by factor after patience steps with no improvement
+                if plateau_counter >= self.lr_patience:
+                    curr_lr = max(curr_lr * self.lr_factor, 1e-8)
+                    plateau_counter = 0
+            else:  # 'adaptive' - original tier-based schedule
+                curr_lr = self._lr_update_adaptive(curr_lr, improved, worse_loss_counter, small_mult)
+
+            pbar.set_postfix({"loss": f"{current_loss:.3e}", "best": f"{best_loss:.3e}", "lr": f"{curr_lr:.2e}", "worse_count": f"{worse_loss_counter}"})
         
-        
-            pbar.set_postfix({"loss": f"{loss.item():.3e}", "best": f"{best_loss:.3e}", "lr": f"{curr_lr:.2e}", "worse_count": f"{worse_loss_counter}"})
-        
-            if loss.item() < 1e-8 or curr_lr < 1e-08 or worse_loss_counter > 500:
+            # Early stopping conditions
+            if current_loss < 1e-8 or curr_lr < 1e-08 or worse_loss_counter > 500:
                 if curr_lr < 1.75e-08 and worse_loss_counter > 450:
                     print("      - Loss has stalled and learning rate has bottomed out. Stopping.")
-                elif loss.item() < 1e-8 and curr_lr < 1.75e-8:
+                elif current_loss < 1e-8 and curr_lr < 1.75e-8:
                     print("      - Learning Rate has bottomed out and loss is negligible. Stopping.")
-                elif worse_loss_counter > 450 and loss.item() > 2e-8:
+                elif worse_loss_counter > 450 and current_loss > 2e-8:
                     print("      - Loss is negligible and loss has stalled. Stopping.")
-                elif loss.item() < 1e-8:
+                elif current_loss < 1e-8:
                     print("      - Loss is negligible. Stopping.")
                 elif curr_lr < 1e-08:
                     print("      - Learning Rate has bottomed out. Stopping.")
@@ -431,6 +392,45 @@ class LearnedRoundingConverter:
         
         pbar.close()
         return best_tensor if best_tensor is not None else W_q_refined
+
+    def _lr_update_adaptive(self, curr_lr: float, improved: bool, worse_loss_counter: int, small_mult: float) -> float:
+        """Original tier-based adaptive LR schedule."""
+        if improved and worse_loss_counter < 50:
+            return min(curr_lr * (1.25 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 50 and worse_loss_counter < 75:
+            return min(curr_lr * (1.375 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 75 and worse_loss_counter < 100:
+            return min(curr_lr * (1.5 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 100 and worse_loss_counter < 125:
+            return min(curr_lr * (1.75 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 125 and worse_loss_counter < 150:
+            return min(curr_lr * (2.0 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 150 and worse_loss_counter < 200:
+            return min(curr_lr * (2.25 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 200 and worse_loss_counter < 250:
+            return min(curr_lr * (2.5 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 250 and worse_loss_counter < 300:
+            return min(curr_lr * (2.75 * small_mult), 100.0)
+        elif improved and worse_loss_counter >= 300:
+            return min(curr_lr * (3.0 * small_mult), 100.0)
+        elif not improved and worse_loss_counter < 26:
+            return max(curr_lr * (0.95 * small_mult), 9e-8)
+        elif worse_loss_counter >= 26 and worse_loss_counter < 51:
+            return max(curr_lr * (0.97 * small_mult), 8e-8)
+        elif worse_loss_counter >= 51 and worse_loss_counter < 76:
+            return max(curr_lr * (0.985 * small_mult), 7e-8)
+        elif worse_loss_counter >= 76 and worse_loss_counter < 101:
+            return max(curr_lr * (0.9875 * small_mult), 6e-8)
+        elif worse_loss_counter >= 101 and worse_loss_counter < 151:
+            return max(curr_lr * (0.98875 * small_mult), 5e-8)
+        elif worse_loss_counter >= 151 and worse_loss_counter < 201:
+            return max(curr_lr * (0.99 * small_mult), 4e-8)
+        elif worse_loss_counter >= 201 and worse_loss_counter < 251:
+            return max(curr_lr * (0.99125 * small_mult), 3e-8)
+        elif worse_loss_counter >= 251 and worse_loss_counter < 301:
+            return max(curr_lr * (0.9925 * small_mult), 2e-8)
+        else:  # worse_loss_counter >= 301
+            return max(curr_lr * (0.995 * small_mult), 5e-9)
 
     def convert(self, W_orig: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         W_float32 = W_orig.to(self.device, dtype=COMPUTE_DTYPE)
@@ -1432,6 +1432,11 @@ def main():
     parser.add_argument("--optimizer", type=str, default="original", choices=["original", "adamw", "ppsf", "radam"], help="Optimization algorithm.")
     parser.add_argument("--num_iter", type=int, default=500, help="Total optimization iterations per tensor.")
     parser.add_argument("--lr", type=float, default=1e-2, help="[AdamW/RAdam/Original] Initial learning rate.")
+    parser.add_argument("--lr_schedule", type=str, default="adaptive", choices=["adaptive", "exponential", "plateau"],
+                        help="LR schedule for 'original' optimizer: 'adaptive' (default custom), 'exponential' (gamma decay), 'plateau' (reduce on stall)")
+    parser.add_argument("--lr_gamma", type=float, default=0.99, help="[exponential] Decay factor per step (default: 0.99)")
+    parser.add_argument("--lr_patience", type=int, default=50, help="[plateau] Steps without improvement before decay (default: 50)")
+    parser.add_argument("--lr_factor", type=float, default=0.5, help="[plateau] Factor to reduce LR by (default: 0.5)")
     parser.add_argument("--top_p", type=float, default=0.01, help="Proportion of principal components (SVD) to use.")
     parser.add_argument("--min_k", type=int, default=1, help="Minimum number of principal components.")
     parser.add_argument("--max_k", type=int, default=16, help="Maximum number of principal components.")
