@@ -3,17 +3,25 @@
 ## 2025-12-12: Custom Layer Quantization with Regex Filtering
 
 ### Session Summary
-Added three-tier quantization priority system: custom regex-matched layers, primary type, and fallback for excluded layers.
+Added three-tier quantization priority system with per-type parameter configuration.
 
 ---
 
-### New CLI Arguments
+### CLI Arguments
 
 | Argument | Description |
 |----------|-------------|
 | `--fallback {fp8,int8,nf4,fp4}` | Quantization type for excluded layers |
 | `--custom-layers PATTERN` | Regex pattern for custom layer matching |
 | `--custom-type {fp8,int8,nf4,fp4}` | Quantization type for custom matches |
+| `--custom-block-size N` | Block size override for custom-type layers |
+| `--custom-simple` | Use simple quantization for custom-type |
+| `--custom-heur` | Apply performance heuristics to custom-type |
+| `--fallback-block-size N` | Block size override for fallback-type layers |
+| `--fallback-simple` | Use simple quantization for fallback-type |
+
+### Auto-enable Behavior
+- `--comfy_quant` is auto-enabled when `--custom-type` is used (required for mixed precision)
 
 ### Priority Order
 1. **Custom** (highest): Layers matching `--custom-layers` regex → use `--custom-type`
@@ -23,9 +31,10 @@ Added three-tier quantization priority system: custom regex-matched layers, prim
 ### Usage
 
 ```bash
-# FP4 primary, FP8 fallback, INT8 for specific layers
-convert_to_quant -i model.safetensors --fp4 --fallback=fp8 \
-    --custom-layers=".*txt_attn\\.to_out.*" --custom-type=int8 --comfy_quant
+# Three-tier with per-type config
+convert_to_quant -i model.safetensors --fp4 --block_size=64 --fallback=fp8 \
+    --custom-layers=".*txt_attn\\.to_out.*" --custom-type=int8 \
+    --custom-block-size=128 --custom-simple
 ```
 
 ---

@@ -1018,6 +1018,8 @@ def convert_to_fp8_scaled(
     radiance: bool, wan: bool, qwen: bool, hunyuan: bool, zimage_l: bool, zimage_s: bool, calib_samples: int, seed: int,
     int8: bool = False, nf4: bool = False, fp4: bool = False,
     fallback: Optional[str] = None, custom_layers: Optional[str] = None, custom_type: Optional[str] = None,
+    custom_block_size: Optional[int] = None, custom_simple: bool = False, custom_heur: bool = False,
+    fallback_block_size: Optional[int] = None, fallback_simple: bool = False,
     full_precision_matrix_mult: bool = False, skip_inefficient_layers: bool = False,
     include_input_scale: bool = False, no_learned_rounding: bool = False,
     **converter_kwargs
@@ -1079,9 +1081,11 @@ def convert_to_fp8_scaled(
     block_size = converter_kwargs.get('block_size', 64)
     
     # Helper function to create converter for a specific format type
-    def create_converter_for_format(fmt: str) -> LearnedRoundingConverter:
+    def create_converter_for_format(fmt: str, overrides: dict = None) -> LearnedRoundingConverter:
         kwargs = converter_kwargs.copy()
         kwargs['target_format'] = fmt
+        if overrides:
+            kwargs.update(overrides)
         return LearnedRoundingConverter(**kwargs)
     
     # Helper function to get format metadata
@@ -1097,12 +1101,30 @@ def convert_to_fp8_scaled(
     
     # Create converters for each format type used
     converters = {'primary': create_converter_for_format(target_format)}
+    
+    # Create fallback converter with optional overrides
     if fallback:
-        converters['fallback'] = create_converter_for_format(fallback)
-        print(f"Fallback quantization enabled: {fallback.upper()} for excluded layers")
+        fallback_overrides = {}
+        if fallback_block_size is not None:
+            fallback_overrides['block_size'] = fallback_block_size
+        if fallback_simple:
+            fallback_overrides['no_learned_rounding'] = True
+        converters['fallback'] = create_converter_for_format(fallback, fallback_overrides if fallback_overrides else None)
+        override_note = f" (block_size={fallback_block_size})" if fallback_block_size else ""
+        override_note += " (simple)" if fallback_simple else ""
+        print(f"Fallback quantization enabled: {fallback.upper()}{override_note} for excluded layers")
+    
+    # Create custom converter with optional overrides
     if custom_layers and custom_type:
-        converters['custom'] = create_converter_for_format(custom_type)
-        print(f"Custom layer quantization enabled: {custom_type.upper()} for layers matching '{custom_layers}'")
+        custom_overrides = {}
+        if custom_block_size is not None:
+            custom_overrides['block_size'] = custom_block_size
+        if custom_simple:
+            custom_overrides['no_learned_rounding'] = True
+        converters['custom'] = create_converter_for_format(custom_type, custom_overrides if custom_overrides else None)
+        override_note = f" (block_size={custom_block_size})" if custom_block_size else ""
+        override_note += " (simple)" if custom_simple else ""
+        print(f"Custom layer quantization enabled: {custom_type.upper()}{override_note} for pattern '{custom_layers}'")
     
     # Compile custom_layers regex pattern
     custom_pattern = None
@@ -1213,7 +1235,9 @@ def convert_to_fp8_scaled(
             continue
         
         # Check performance heuristics for inefficient layers
-        if skip_inefficient_layers:
+        # Custom layers use custom_heur flag, others use global skip_inefficient_layers
+        apply_heur = custom_heur if use_custom else skip_inefficient_layers
+        if apply_heur:
             should_skip, skip_perf_reason = should_skip_layer_for_performance(original_tensor, block_size)
             if should_skip:
                 print(f"  - Skipping for performance: {skip_perf_reason}")
@@ -1359,6 +1383,18 @@ def main():
     parser.add_argument("--custom-type", type=str, default=None, dest="custom_type",
                         choices=["fp8", "int8", "nf4", "fp4"],
                         help="Quantization type for custom layer matches.")
+    # Custom-type parameter overrides
+    parser.add_argument("--custom-block-size", type=int, default=None, dest="custom_block_size",
+                        help="Block size for custom-type layers (default: inherit --block_size)")
+    parser.add_argument("--custom-simple", action='store_true', dest="custom_simple",
+                        help="Use simple quantization for custom-type layers")
+    parser.add_argument("--custom-heur", action='store_true', dest="custom_heur",
+                        help="Apply performance heuristics to custom-type layers")
+    # Fallback-type parameter overrides
+    parser.add_argument("--fallback-block-size", type=int, default=None, dest="fallback_block_size",
+                        help="Block size for fallback-type layers (default: inherit --block_size)")
+    parser.add_argument("--fallback-simple", action='store_true', dest="fallback_simple",
+                        help="Use simple quantization for fallback-type layers")
     parser.add_argument("--kernel_backend", type=str, default="blockwise", choices=["blockwise", "lodewise"],
                         help="Kernel backend for INT8 quantization. 'blockwise' uses BlockWiseINT8Layout (2D tile-level scales), 'lodewise' uses Lode-Wise kernels (per-output-lane scales).")
     parser.add_argument("--simple", action='store_true', help="Skip SVD optimization, use simple quantization.")
@@ -1393,6 +1429,11 @@ def main():
     if not os.path.exists(args.input):
         print(f"Error: Input file not found: {args.input}")
         return
+
+    # Auto-enable comfy_quant if custom-type is used (required for mixed precision)
+    if args.custom_type and not args.comfy_quant:
+        print("Note: --comfy_quant auto-enabled (required for --custom-type mixed precision)")
+        args.comfy_quant = True
 
     # Check lodewise kernel backend availability
     if args.kernel_backend == 'lodewise' and not _HAS_LODEWISE:
@@ -1440,6 +1481,7 @@ def main():
     excluded_keys = ['input', 'output', 'comfy_quant', 't5xxl', 'distillation_large', 'distillation_small', 
                      'nerf_large', 'nerf_small', 'radiance', 'wan', 'qwen', 'hunyuan', 'zimage_l', 'zimage_s', 
                      'calib_samples', 'manual_seed', 'int8', 'nf4', 'fp4', 'fallback', 'custom_layers', 'custom_type',
+                     'custom_block_size', 'custom_simple', 'custom_heur', 'fallback_block_size', 'fallback_simple',
                      'full_precision_matrix_mult', 'heur', 'input_scale', 'simple']
     converter_kwargs = {k: v for k, v in vars(args).items() if k not in excluded_keys}
 
@@ -1449,6 +1491,8 @@ def main():
         args.radiance, args.wan, args.qwen, args.hunyuan, args.zimage_l, args.zimage_s, args.calib_samples, seed,
         int8=args.int8, nf4=args.nf4, fp4=args.fp4,
         fallback=args.fallback, custom_layers=args.custom_layers, custom_type=args.custom_type,
+        custom_block_size=args.custom_block_size, custom_simple=args.custom_simple, custom_heur=args.custom_heur,
+        fallback_block_size=args.fallback_block_size, fallback_simple=args.fallback_simple,
         full_precision_matrix_mult=args.full_precision_matrix_mult,
         skip_inefficient_layers=args.heur,
         include_input_scale=args.input_scale,
