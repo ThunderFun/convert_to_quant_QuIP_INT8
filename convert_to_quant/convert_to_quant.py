@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 import torch
 from safetensors import safe_open
@@ -1016,6 +1017,7 @@ def convert_to_fp8_scaled(
     distillation_small: bool, nerf_large: bool, nerf_small: bool,
     radiance: bool, wan: bool, qwen: bool, hunyuan: bool, zimage_l: bool, zimage_s: bool, calib_samples: int, seed: int,
     int8: bool = False, nf4: bool = False, fp4: bool = False,
+    fallback: Optional[str] = None, custom_layers: Optional[str] = None, custom_type: Optional[str] = None,
     full_precision_matrix_mult: bool = False, skip_inefficient_layers: bool = False,
     include_input_scale: bool = False, no_learned_rounding: bool = False,
     **converter_kwargs
@@ -1074,9 +1076,42 @@ def convert_to_fp8_scaled(
     
     # Extract kernel_backend for comfy_quant format (default to 'blockwise')
     kernel_backend = converter_kwargs.get('kernel_backend', 'blockwise')
-    
-    converter = LearnedRoundingConverter(**converter_kwargs)
     block_size = converter_kwargs.get('block_size', 64)
+    
+    # Helper function to create converter for a specific format type
+    def create_converter_for_format(fmt: str) -> LearnedRoundingConverter:
+        kwargs = converter_kwargs.copy()
+        kwargs['target_format'] = fmt
+        return LearnedRoundingConverter(**kwargs)
+    
+    # Helper function to get format metadata
+    def get_format_info(fmt: str) -> dict:
+        """Returns dtype and format name for a quantization format."""
+        format_map = {
+            'nf4': {'dtype': torch.uint8, 'name': 'NF4', 'is_4bit': True},
+            'fp4': {'dtype': torch.uint8, 'name': 'FP4', 'is_4bit': True},
+            'int8': {'dtype': TARGET_INT8_DTYPE, 'name': 'INT8', 'is_4bit': False},
+            'fp8': {'dtype': TARGET_FP8_DTYPE, 'name': 'FP8', 'is_4bit': False},
+        }
+        return format_map.get(fmt, format_map['fp8'])
+    
+    # Create converters for each format type used
+    converters = {'primary': create_converter_for_format(target_format)}
+    if fallback:
+        converters['fallback'] = create_converter_for_format(fallback)
+        print(f"Fallback quantization enabled: {fallback.upper()} for excluded layers")
+    if custom_layers and custom_type:
+        converters['custom'] = create_converter_for_format(custom_type)
+        print(f"Custom layer quantization enabled: {custom_type.upper()} for layers matching '{custom_layers}'")
+    
+    # Compile custom_layers regex pattern
+    custom_pattern = None
+    if custom_layers:
+        try:
+            custom_pattern = re.compile(custom_layers)
+        except re.error as e:
+            print(f"ERROR: Invalid regex pattern '{custom_layers}': {e}")
+            return
 
     print("\nScanning model and generating simulated calibration data...")
     calibration_data_cache = {}
@@ -1093,54 +1128,82 @@ def convert_to_fp8_scaled(
     total_weights = len(weight_keys)
     skipped_count = 0
     processed_count = 0
+    custom_count = 0
+    fallback_count = 0
 
     print(f"Found {total_weights} weight tensors to potentially process.")
     print("-" * 60)
 
     for i, key in enumerate(weight_keys):
-        skip_reason = ""
+        exclusion_reason = ""
+        use_custom = False
+        use_fallback = False
+        layer_format = target_format  # default to primary
 
+        # T5XXL decoder tensors are always removed (not quantized, not kept)
         if t5xxl and any(n in key for n in T5XXL_REMOVE_KEY_NAMES):
             print(f"({i+1}/{total_weights}) Removing T5XXL decoder tensor: {key}")
             skipped_count += 1
             continue
-        if t5xxl and any(n in key for n in AVOID_KEY_NAMES):
-            skip_reason = "T5XXL exclusion"
-        elif radiance and any(n in key for n in RADIANCE_LAYER_KEYNAMES):
-            skip_reason = "Radiance exclusion"
-        elif wan and any(n in key for n in AVOID_KEY_NAMES):
-            skip_reason = "WAN exclusion"
-        elif qwen and any(n in key for n in QWEN_AVOID_KEY_NAMES):
-            skip_reason = "Qwen Image exclusion"
-        elif zimage_l and any(n in key for n in ZIMAGE_AVOID_KEY_NAMES):
-            skip_reason = "Z-Image exclusion"
-        elif zimage_s and any(n in key for n in ZIMAGE_AVOID_KEY_NAMES):
-            skip_reason = "Z-Image exclusion"
-        elif hunyuan and any(n in key for n in HUNYUAN_AVOID_KEY_NAMES):
-            skip_reason = "Hunyuan Video 1.5 exclusion"
-        elif distillation_large and any(n in key for n in DISTILL_LAYER_KEYNAMES_LARGE):
-            skip_reason = "Distillation layer and Flux1 keep in high precision"
-        elif distillation_small and any(n in key for n in DISTILL_LAYER_KEYNAMES_SMALL):
-            skip_reason = "Distillation layer keep in high precision"
-        elif nerf_large and any(n in key for n in NERF_LAYER_KEYNAMES_LARGE):
-            skip_reason = "NeRF layer, distillation layer and txt_in keep in high precision"
-        elif nerf_small and any(n in key for n in NERF_LAYER_KEYNAMES_SMALL):
-            skip_reason = "NeRF layer and distillation layer keep in high precision"
-        elif wan and any(n in key for n in WAN_LAYER_KEYNAMES):
-            skip_reason = "WAN layer keep in high precision"
-        elif qwen and any(n in key for n in QWEN_LAYER_KEYNAMES):
-            skip_reason = "Qwen Image layer keep in high precision"
-        elif zimage_l and any(n in key for n in ZIMAGE_LAYER_KEYNAMES):
-            skip_reason = "Z-Image layer keep in high precision"
 
-        if skip_reason:
-            print(f"({i+1}/{total_weights}) Skipping tensor: {key} (Reason: {skip_reason})")
-            original_tensor = tensors[key]
-            new_tensors[key] = original_tensor.to(device='cpu', dtype=original_tensor.dtype)
-            skipped_count += 1
-            continue
+        # Check for custom pattern match FIRST (highest priority)
+        if custom_pattern and custom_pattern.search(key):
+            use_custom = True
+            layer_format = custom_type
 
-        print(f"({i+1}/{total_weights}) Processing tensor: {key}")
+        # Check exclusion filters (only matters if not custom matched)
+        if not use_custom:
+            if t5xxl and any(n in key for n in AVOID_KEY_NAMES):
+                exclusion_reason = "T5XXL exclusion"
+            elif radiance and any(n in key for n in RADIANCE_LAYER_KEYNAMES):
+                exclusion_reason = "Radiance exclusion"
+            elif wan and any(n in key for n in AVOID_KEY_NAMES):
+                exclusion_reason = "WAN exclusion"
+            elif qwen and any(n in key for n in QWEN_AVOID_KEY_NAMES):
+                exclusion_reason = "Qwen Image exclusion"
+            elif zimage_l and any(n in key for n in ZIMAGE_AVOID_KEY_NAMES):
+                exclusion_reason = "Z-Image exclusion"
+            elif zimage_s and any(n in key for n in ZIMAGE_AVOID_KEY_NAMES):
+                exclusion_reason = "Z-Image exclusion"
+            elif hunyuan and any(n in key for n in HUNYUAN_AVOID_KEY_NAMES):
+                exclusion_reason = "Hunyuan Video 1.5 exclusion"
+            elif distillation_large and any(n in key for n in DISTILL_LAYER_KEYNAMES_LARGE):
+                exclusion_reason = "Distillation layer and Flux1 keep in high precision"
+            elif distillation_small and any(n in key for n in DISTILL_LAYER_KEYNAMES_SMALL):
+                exclusion_reason = "Distillation layer keep in high precision"
+            elif nerf_large and any(n in key for n in NERF_LAYER_KEYNAMES_LARGE):
+                exclusion_reason = "NeRF layer, distillation layer and txt_in keep in high precision"
+            elif nerf_small and any(n in key for n in NERF_LAYER_KEYNAMES_SMALL):
+                exclusion_reason = "NeRF layer and distillation layer keep in high precision"
+            elif wan and any(n in key for n in WAN_LAYER_KEYNAMES):
+                exclusion_reason = "WAN layer keep in high precision"
+            elif qwen and any(n in key for n in QWEN_LAYER_KEYNAMES):
+                exclusion_reason = "Qwen Image layer keep in high precision"
+            elif zimage_l and any(n in key for n in ZIMAGE_LAYER_KEYNAMES):
+                exclusion_reason = "Z-Image layer keep in high precision"
+
+        # Handle excluded layers: use fallback if available, otherwise skip
+        if exclusion_reason and not use_custom:
+            if fallback:
+                use_fallback = True
+                layer_format = fallback
+                print(f"({i+1}/{total_weights}) Processing (fallback {fallback.upper()}): {key} (was: {exclusion_reason})")
+            else:
+                print(f"({i+1}/{total_weights}) Skipping tensor: {key} (Reason: {exclusion_reason})")
+                original_tensor = tensors[key]
+                new_tensors[key] = original_tensor.to(device='cpu', dtype=original_tensor.dtype)
+                skipped_count += 1
+                continue
+
+        # Log what we're doing
+        if use_custom:
+            print(f"({i+1}/{total_weights}) Processing (custom {custom_type.upper()}): {key}")
+            custom_count += 1
+        elif use_fallback:
+            fallback_count += 1
+        else:
+            print(f"({i+1}/{total_weights}) Processing ({format_name}): {key}")
+        
         processed_count += 1
         original_tensor = tensors[key]
 
@@ -1158,6 +1221,19 @@ def convert_to_fp8_scaled(
                 skipped_count += 1
                 continue
 
+        # Select the appropriate converter based on layer format
+        if use_custom:
+            converter = converters['custom']
+        elif use_fallback:
+            converter = converters['fallback']
+        else:
+            converter = converters['primary']
+        
+        # Get format info for this layer
+        fmt_info = get_format_info(layer_format)
+        is_4bit = fmt_info['is_4bit']
+        is_int8 = (layer_format == 'int8')
+
         q_tensor, dequant_s, dequant_w = converter.convert(original_tensor)
         new_tensors[key] = q_tensor.to(device='cpu')
         base_name = key[:key.rfind('.weight')]
@@ -1165,15 +1241,15 @@ def convert_to_fp8_scaled(
         
         if comfy_quant is True:
             # Use appropriate scale key name based on format
-            if nf4 or fp4:
+            if is_4bit:
                 # 4-bit formats use absmax instead of weight_scale
                 new_tensors[f"{base_name}.absmax"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 comfy_quant_tensor = create_comfy_quant_tensor(
-                    "bnb_nf4" if nf4 else "bnb_fp4",
+                    "bnb_nf4" if layer_format == 'nf4' else "bnb_fp4",
                     block_size=block_size,
                     full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
                 )
-            elif int8:
+            elif is_int8:
                 new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 # Use int8_blockwise or int8_lodewise based on kernel_backend
                 int8_format = "int8_lodewise" if kernel_backend == "lodewise" else "int8_blockwise"
@@ -1253,7 +1329,19 @@ def convert_to_fp8_scaled(
 
     print("-" * 60)
     print("Summary:")
-    print(f"  - Original tensor count : {len(tensors)}\n  - Weights processed     : {processed_count}\n  - Weights skipped       : {skipped_count}\n  - Final tensor count    : {len(new_tensors)}")
+    summary_parts = [
+        f"  - Original tensor count : {len(tensors)}",
+        f"  - Weights processed     : {processed_count}",
+    ]
+    if custom_count > 0:
+        summary_parts.append(f"    - Custom type layers  : {custom_count}")
+    if fallback_count > 0:
+        summary_parts.append(f"    - Fallback type layers: {fallback_count}")
+    summary_parts.extend([
+        f"  - Weights skipped       : {skipped_count}",
+        f"  - Final tensor count    : {len(new_tensors)}",
+    ])
+    print("\n".join(summary_parts))
     print("-" * 60)
 
 def main():
@@ -1264,6 +1352,13 @@ def main():
     parser.add_argument("--int8", action='store_true', help="Use INT8 block-wise quantization instead of FP8.")
     parser.add_argument("--nf4", action='store_true', help="Use NF4 (4-bit Normal Float) quantization.")
     parser.add_argument("--fp4", action='store_true', help="Use FP4 (4-bit Floating Point) quantization.")
+    parser.add_argument("--fallback", type=str, default=None, choices=["fp8", "int8", "nf4", "fp4"],
+                        help="Fallback quantization type for excluded layers (instead of keeping original precision).")
+    parser.add_argument("--custom-layers", type=str, default=None, dest="custom_layers",
+                        help="Regex pattern for layers to quantize with custom type. Takes priority over exclusions.")
+    parser.add_argument("--custom-type", type=str, default=None, dest="custom_type",
+                        choices=["fp8", "int8", "nf4", "fp4"],
+                        help="Quantization type for custom layer matches.")
     parser.add_argument("--kernel_backend", type=str, default="blockwise", choices=["blockwise", "lodewise"],
                         help="Kernel backend for INT8 quantization. 'blockwise' uses BlockWiseINT8Layout (2D tile-level scales), 'lodewise' uses Lode-Wise kernels (per-output-lane scales).")
     parser.add_argument("--simple", action='store_true', help="Skip SVD optimization, use simple quantization.")
@@ -1344,8 +1439,8 @@ def main():
     # Separate converter kwargs from function kwargs
     excluded_keys = ['input', 'output', 'comfy_quant', 't5xxl', 'distillation_large', 'distillation_small', 
                      'nerf_large', 'nerf_small', 'radiance', 'wan', 'qwen', 'hunyuan', 'zimage_l', 'zimage_s', 
-                     'calib_samples', 'manual_seed', 'int8', 'nf4', 'fp4', 'full_precision_matrix_mult', 'heur',
-                     'input_scale', 'simple']
+                     'calib_samples', 'manual_seed', 'int8', 'nf4', 'fp4', 'fallback', 'custom_layers', 'custom_type',
+                     'full_precision_matrix_mult', 'heur', 'input_scale', 'simple']
     converter_kwargs = {k: v for k, v in vars(args).items() if k not in excluded_keys}
 
     convert_to_fp8_scaled(
@@ -1353,6 +1448,7 @@ def main():
         args.distillation_small, args.nerf_large, args.nerf_small,
         args.radiance, args.wan, args.qwen, args.hunyuan, args.zimage_l, args.zimage_s, args.calib_samples, seed,
         int8=args.int8, nf4=args.nf4, fp4=args.fp4,
+        fallback=args.fallback, custom_layers=args.custom_layers, custom_type=args.custom_type,
         full_precision_matrix_mult=args.full_precision_matrix_mult,
         skip_inefficient_layers=args.heur,
         include_input_scale=args.input_scale,

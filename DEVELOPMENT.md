@@ -1,5 +1,35 @@
 # Development Log
 
+## 2025-12-12: Custom Layer Quantization with Regex Filtering
+
+### Session Summary
+Added three-tier quantization priority system: custom regex-matched layers, primary type, and fallback for excluded layers.
+
+---
+
+### New CLI Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `--fallback {fp8,int8,nf4,fp4}` | Quantization type for excluded layers |
+| `--custom-layers PATTERN` | Regex pattern for custom layer matching |
+| `--custom-type {fp8,int8,nf4,fp4}` | Quantization type for custom matches |
+
+### Priority Order
+1. **Custom** (highest): Layers matching `--custom-layers` regex → use `--custom-type`
+2. **Primary**: Normal layers → use primary type (--fp4/--nf4/--int8/--fp8)
+3. **Fallback**: Excluded layers → use `--fallback` type (or skip if not set)
+
+### Usage
+
+```bash
+# FP4 primary, FP8 fallback, INT8 for specific layers
+convert_to_quant -i model.safetensors --fp4 --fallback=fp8 \
+    --custom-layers=".*txt_attn\\.to_out.*" --custom-type=int8 --comfy_quant
+```
+
+---
+
 ## 2025-12-12: ComfyUI support_bnb_quant Branch Sync
 
 ### Session Summary
