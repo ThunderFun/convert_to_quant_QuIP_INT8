@@ -1264,13 +1264,16 @@ def convert_to_fp8_scaled(
         bias_key = f"{base_name}.bias"
         
         if comfy_quant is True:
+            # Use the converter's block_size (respects custom/fallback overrides)
+            layer_block_size = converter.block_size
+            
             # Use appropriate scale key name based on format
             if is_4bit:
                 # 4-bit formats use absmax instead of weight_scale
                 new_tensors[f"{base_name}.absmax"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 comfy_quant_tensor = create_comfy_quant_tensor(
                     "bnb_nf4" if layer_format == 'nf4' else "bnb_fp4",
-                    block_size=block_size,
+                    block_size=layer_block_size,
                     full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
                 )
             elif is_int8:
@@ -1279,7 +1282,7 @@ def convert_to_fp8_scaled(
                 int8_format = "int8_lodewise" if kernel_backend == "lodewise" else "int8_blockwise"
                 comfy_quant_tensor = create_comfy_quant_tensor(
                     int8_format, 
-                    block_size=block_size,
+                    block_size=layer_block_size,
                     full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
                 )
                 # Add input_scale placeholder for INT8 (required by ComfyUI)
@@ -1422,7 +1425,7 @@ def main():
     parser.add_argument("--zimage_s", action='store_true', help="Exclude known Z-Image layers.")
     parser.add_argument("--full_matrix", action='store_true', help="If should use torch.linalg.svd with full matices instead of the torch.svd_lowrank.")
     parser.add_argument("--scaling_mode", type=str, default="tensor", choices=["tensor", "block"], help="Quantization scaling mode.")
-    parser.add_argument("--block_size", type=int, default=64, help="Block size for 'block' scaling mode (used by both FP8 and INT8).")
+    parser.add_argument("--block_size", type=int, default=None, help="Block size for block-wise quantization (REQUIRED for INT8, NF4, FP4). Common values: 64, 128.")
     parser.add_argument("--calib_samples", type=int, default=3072, help="Number of random samples for bias correction.")
     parser.add_argument("--manual_seed", type=int, default=-1, help="Set a manual seed for reproducibility. Use -1 for random.")
     parser.add_argument("--optimizer", type=str, default="original", choices=["original", "adamw", "ppsf", "radam"], help="Optimization algorithm.")
@@ -1433,6 +1436,30 @@ def main():
     parser.add_argument("--max_k", type=int, default=16, help="Maximum number of principal components.")
 
     args = parser.parse_args()
+
+    # Determine which formats require block_size
+    primary_needs_block_size = args.int8 or args.nf4 or args.fp4
+    custom_needs_block_size = args.custom_type in ('int8', 'nf4', 'fp4')
+    fallback_needs_block_size = args.fallback in ('int8', 'nf4', 'fp4')
+
+    # Validate block_size for primary format
+    if primary_needs_block_size and args.block_size is None:
+        format_name = "INT8" if args.int8 else "NF4" if args.nf4 else "FP4"
+        print(f"Error: --block_size is required when using {format_name} quantization.")
+        print(f"       Example: --block_size 128")
+        sys.exit(1)
+
+    # Validate custom-block-size for custom format
+    if args.custom_type and custom_needs_block_size and args.custom_block_size is None:
+        print(f"Error: --custom-block-size is required when using --custom-type {args.custom_type}.")
+        print(f"       Example: --custom-block-size 128")
+        sys.exit(1)
+
+    # Validate fallback-block-size for fallback format
+    if args.fallback and fallback_needs_block_size and args.fallback_block_size is None:
+        print(f"Error: --fallback-block-size is required when using --fallback {args.fallback}.")
+        print(f"       Example: --fallback-block-size 128")
+        sys.exit(1)
 
     if not os.path.exists(args.input):
         print(f"Error: Input file not found: {args.input}")
