@@ -1,14 +1,14 @@
 import torch
 import logging
 from typing import Tuple, Dict
-import float_utils.float as float
+from . import float as comfy_float  # Aliased to match ComfyUI's comfy.float usage
 
 _LAYOUT_REGISTRY = {}
 _GENERIC_UTILS = {}
 
 # Try to import Triton-based INT8 kernels
 try:
-    from kernels.int8_kernels import (
+    from .int8_kernels import (
         act_quant as triton_act_quant,
         act_dequant as triton_act_dequant,
         weight_quant as triton_weight_quant,
@@ -26,7 +26,7 @@ except ImportError:
 
 # Try to import NF4/FP4 kernels
 try:
-    from kernels.nf4_kernels import (
+    from .nf4_kernels import (
         quantize_4bit,
         dequantize_4bit,
         quantize_nf4,
@@ -34,8 +34,8 @@ try:
         quantize_fp4,
         dequantize_fp4,
         QuantState4bit,
-        pack_4bit,
-        unpack_4bit,
+        NF4_CODEBOOK,
+        FP4_CODEBOOK_NORMALIZED,
     )
     _HAS_NF4_KERNELS = True
 except ImportError:
@@ -254,15 +254,6 @@ class QuantizedTensor(torch.Tensor):
         to_return = cls._dequant_and_fallback(func, args, kwargs)
 
         return to_return
- 
-    def data_ptr(self):
-        return self._qdata.data_ptr()
-
-    def is_pinned(self):
-        return self._qdata.is_pinned()
-
-    def is_contiguous(self):
-        return self._qdata.is_contiguous()
 
     @classmethod
     def _dequant_and_fallback(cls, func, args, kwargs):
@@ -288,6 +279,7 @@ class QuantizedTensor(torch.Tensor):
 
     def storage(self):
         return self._qdata.storage()
+
 
 # ==============================================================================
 # Generic Utilities (Layout-Agnostic Operations)
@@ -464,7 +456,7 @@ class TensorCoreFP8Layout(QuantizedLayout):
             scale = torch.ones((), device=tensor.device, dtype=torch.float32)
 
         if stochastic_rounding > 0:
-            tensor = float.stochastic_rounding(tensor, dtype=dtype, seed=stochastic_rounding)
+            tensor = comfy.float.stochastic_rounding(tensor, dtype=dtype, seed=stochastic_rounding)
         else:
             lp_amax = torch.finfo(dtype).max
             torch.clamp(tensor, min=-lp_amax, max=lp_amax, out=tensor)
@@ -724,20 +716,20 @@ class BlockWiseINT8Layout(QuantizedLayout):
 
 
 # ==============================================================================
-# Block-Wise INT8 Lode-Wise Layout
+# Lode-Wise INT8 Layout (Alternative scale indexing)
 # ==============================================================================
 class BlockWiseINT8LayoutLodeWise(QuantizedLayout):
     """
-    Block-wise INT8 quantization layout with Lode-Wise kernel access pattern.
+    Lode-Wise INT8 quantization layout.
     
-    This layout uses per-row, per-K-block scaling for weights (different from
-    BlockWiseINT8Layout's 2D block grid).
+    This layout uses a different weight scale storage pattern than BlockWiseINT8Layout:
+    - Weight scales are organized for per-output-lane access: b_s[n * k_blocks + k_idx]
+    - Optimized for smaller tile sizes (16, 32, 64)
+    - Uses autotuned kernel configurations
     
     Storage format:
     - qdata: INT8 tensor (torch.int8)
-    - scale: Per-block scaling factors (float32)
-      - For weights: shape (N, K//block_size) - per-row, column-block scales
-      - For activations: shape (*batch_dims, K//block_size)
+    - scale: Per-block scaling factors with Lode-Wise indexing
     - block_size: Size of quantization blocks (default 128)
     - orig_dtype: Original dtype before quantization
     - is_weight: Whether this is a weight tensor
@@ -786,7 +778,6 @@ class BlockWiseINT8LayoutLodeWise(QuantizedLayout):
             assert K % block_size == 0, \
                 f"Last dimension must be divisible by block_size={block_size}, got {K}"
             
-            # Use Triton kernel if available AND tensor is on CUDA
             if _HAS_TRITON_INT8 and tensor.is_cuda:
                 try:
                     qdata, scale = triton_act_quant(tensor, block_size=block_size)
@@ -888,17 +879,7 @@ class BlockWiseINT8LayoutLodeWise(QuantizedLayout):
 class NF4Layout(QuantizedLayout):
     """
     NF4 (Normal Float 4-bit) quantization layout.
-    
-    Uses a 16-value codebook derived from the normal distribution,
-    with block-wise scaling for precision.
-    
-    Storage format:
-    - qdata: Packed uint8 tensor (2 values per byte)
-    - absmax: Per-block absolute maximum values (float32)
-    - block_size: Size of quantization blocks (default 64)
-    - orig_dtype: Original dtype before quantization
-    - shape: Original tensor shape (for unpacking)
-    
+    Uses a 16-value codebook derived from the normal distribution.
     Reference: QLoRA paper (https://arxiv.org/abs/2305.14314)
     """
     
@@ -928,7 +909,6 @@ class NF4Layout(QuantizedLayout):
         if not _HAS_NF4_KERNELS:
             raise RuntimeError("NF4 kernels not available")
         
-        from kernels.nf4_kernels import NF4_CODEBOOK
         if code is None:
             code = NF4_CODEBOOK.to(qdata.device)
         
@@ -955,9 +935,7 @@ class NF4Layout(QuantizedLayout):
 class FP4Layout(QuantizedLayout):
     """
     FP4 (Floating Point 4-bit) quantization layout.
-    
-    Uses a 16-value codebook representing a hardware-inspired
-    4-bit floating point format.
+    Uses a 16-value codebook for hardware-inspired 4-bit float.
     """
     
     @classmethod
@@ -986,7 +964,6 @@ class FP4Layout(QuantizedLayout):
         if not _HAS_NF4_KERNELS:
             raise RuntimeError("FP4 kernels not available")
         
-        from kernels.nf4_kernels import FP4_CODEBOOK_NORMALIZED
         if code is None:
             code = FP4_CODEBOOK_NORMALIZED.to(qdata.device)
         
@@ -1328,7 +1305,7 @@ def _int8_gemm_triton_or_fallback(a_int8, a_scale, b_int8, b_scale, block_size, 
     # If out_quant is requested, quantize the fallback output
     if out_quant:
         # Use PyTorch activation quantization on the output
-        from kernels.int8_kernels import act_quant
+        from .int8_kernels import act_quant
         try:
             output_int8, output_scale = act_quant(fallback_output, block_size=block_size)
             return output_int8, output_scale
@@ -1732,7 +1709,7 @@ def int8_gelu(func, args, kwargs):
         if _HAS_TRITON_INT8 and qdata.is_cuda:
             try:
                 # Import the Triton kernel
-                from kernels.int8_kernels import int8_gelu as triton_int8_gelu
+                from .int8_kernels import int8_gelu as triton_int8_gelu
                 
                 # Call fused kernel
                 output_qdata, output_scale = triton_int8_gelu(qdata, scale, block_size=block_size)
@@ -1845,4 +1822,225 @@ def int8_to_dtype(func, args, kwargs):
             return input_tensor
     
     # For any other dtype or non-quantized tensors, use standard fallback
+    return QuantizedTensor._dequant_and_fallback(func, args, kwargs)
+
+
+# ==============================================================================
+# Lode-Wise INT8 Layout Operation Handlers
+# ==============================================================================
+
+def _int8_gemm_lodewise_triton_or_fallback(a_int8, a_scale, b_int8, b_scale, block_size, bias=None):
+    """
+    Lode-Wise INT8 matrix multiplication using Triton kernels or PyTorch fallback.
+    
+    This uses the Lode-Wise kernel with per-output-lane weight scale access pattern.
+    
+    Args:
+        a_int8: INT8 activations, shape (*batch, K)
+        a_scale: Activation scales, shape (*batch, K//block_size)
+        b_int8: INT8 weights, shape (N, K) - standard PyTorch weight format
+        b_scale: Weight scales, shape (N, K//block_size) - Lode-Wise layout
+        block_size: Block size for quantization
+        bias: Optional bias vector, shape (N,)
+    
+    Returns:
+        Output tensor, shape (*batch, N)
+    """
+    K = a_int8.shape[-1]
+    batch_shape = a_int8.shape[:-1]
+    N = b_int8.shape[0]
+    
+    # Try Triton kernel first
+    if _HAS_TRITON_INT8 and a_int8.is_cuda:
+        try:
+            # Reshape activations to 2D
+            a_2d = a_int8.reshape(-1, K).contiguous()
+            a_scale_2d = a_scale.reshape(-1, a_scale.shape[-1]).contiguous()
+            
+            # Ensure weight tensors are contiguous
+            b_int8_c = b_int8.contiguous()
+            b_scale_c = b_scale.contiguous()
+            
+            # Use Lode-Wise kernel
+            output_2d = triton_int8_gemm_lodewise(a_2d, a_scale_2d, b_int8_c, b_scale_c)
+            
+            # Add bias if present
+            if bias is not None:
+                output_2d = output_2d + bias
+            
+            # Reshape back to original batch shape
+            output = output_2d.reshape(*batch_shape, N)
+            return output
+        except Exception as e:
+            logging.warning(f"Triton int8_gemm_lodewise failed: {e}, falling back to PyTorch")
+    
+    # PyTorch fallback: dequantize and use standard matmul
+    # Dequantize activations
+    k_blocks = K // block_size
+    a_blocked = a_int8.reshape(*batch_shape, k_blocks, block_size)
+    a_scale_broadcast = a_scale.unsqueeze(-1)
+    a_fp32 = a_blocked.to(torch.float32) * a_scale_broadcast
+    a_fp32 = a_fp32.reshape(*batch_shape, K)
+    
+    # Dequantize weights (Lode-Wise layout: scale shape is (N, k_blocks))
+    b_blocked = b_int8.reshape(N, k_blocks, block_size)
+    b_scale_broadcast = b_scale.unsqueeze(-1)
+    b_fp32 = b_blocked.to(torch.float32) * b_scale_broadcast
+    b_fp32 = b_fp32.reshape(N, K)
+    
+    output = torch.nn.functional.linear(a_fp32, b_fp32, bias)
+    return output
+
+
+@register_layout_op(torch.ops.aten.linear.default, "BlockWiseINT8LayoutLodeWise")
+def int8_linear_lodewise(func, args, kwargs):
+    """
+    Lode-Wise INT8 linear operation handler.
+    """
+    input_tensor = args[0]
+    weight = args[1]
+    bias = args[2] if len(args) > 2 else None
+    
+    # Case 1: Both input and weight are quantized
+    if isinstance(input_tensor, QuantizedTensor) and isinstance(weight, QuantizedTensor):
+        # Extract quantized data
+        a_int8, a_scale, a_block_size, a_is_weight = BlockWiseINT8LayoutLodeWise.get_plain_tensors(input_tensor)
+        b_int8, b_scale, b_block_size, b_is_weight = BlockWiseINT8LayoutLodeWise.get_plain_tensors(weight)
+        
+        assert a_block_size == b_block_size, f"Block sizes must match: {a_block_size} vs {b_block_size}"
+        
+        orig_dtype = input_tensor._layout_params['orig_dtype']
+        out_dtype = kwargs.get('out_dtype', orig_dtype)
+        
+        # Call Lode-Wise kernel
+        output = _int8_gemm_lodewise_triton_or_fallback(
+            a_int8, a_scale, b_int8, b_scale, a_block_size, bias=bias
+        )
+        
+        # Convert to target dtype if needed
+        if output.dtype != out_dtype:
+            output = output.to(out_dtype)
+        return output
+    
+    # Case 2: Fallback - dequantize and use standard linear
+    if isinstance(weight, QuantizedTensor):
+        weight = weight.dequantize()
+    if isinstance(input_tensor, QuantizedTensor):
+        input_tensor = input_tensor.dequantize()
+    
+    return torch.nn.functional.linear(input_tensor, weight, bias)
+
+
+@register_layout_op(torch.ops.aten.mm.default, "BlockWiseINT8LayoutLodeWise")
+def int8_mm_lodewise(func, args, kwargs):
+    """Lode-Wise INT8 matrix multiplication handler."""
+    input_tensor = args[0]
+    weight = args[1]
+    
+    if isinstance(input_tensor, QuantizedTensor) and isinstance(weight, QuantizedTensor):
+        a_int8, a_scale, a_block_size, _ = BlockWiseINT8LayoutLodeWise.get_plain_tensors(input_tensor)
+        b_int8, b_scale, b_block_size, _ = BlockWiseINT8LayoutLodeWise.get_plain_tensors(weight)
+        
+        assert a_block_size == b_block_size
+        
+        orig_dtype = input_tensor._layout_params['orig_dtype']
+        
+        output = _int8_gemm_lodewise_triton_or_fallback(
+            a_int8, a_scale, b_int8, b_scale, a_block_size, bias=None
+        )
+        
+        if output.dtype != orig_dtype:
+            output = output.to(orig_dtype)
+        return output
+    
+    # Fallback
+    a = list(args)
+    if isinstance(args[0], QuantizedTensor):
+        a[0] = args[0].dequantize()
+    if isinstance(args[1], QuantizedTensor):
+        a[1] = args[1].dequantize()
+    return func(*a, **kwargs)
+
+
+@register_layout_op(torch.ops.aten.addmm.default, "BlockWiseINT8LayoutLodeWise")
+def int8_addmm_lodewise(func, args, kwargs):
+    """Lode-Wise INT8 addmm operation handler."""
+    bias = args[0]
+    input_tensor = args[1]
+    weight = args[2]
+    
+    if isinstance(input_tensor, QuantizedTensor) and isinstance(weight, QuantizedTensor):
+        a_int8, a_scale, a_block_size, _ = BlockWiseINT8LayoutLodeWise.get_plain_tensors(input_tensor)
+        b_int8, b_scale, b_block_size, b_is_weight = BlockWiseINT8LayoutLodeWise.get_plain_tensors(weight)
+        
+        assert a_block_size == b_block_size
+        
+        orig_dtype = input_tensor._layout_params['orig_dtype']
+        
+        # Handle transposed weights from F.linear
+        K = a_int8.shape[-1]
+        if b_is_weight and b_int8.shape[0] == K:
+            b_int8 = b_int8.t().contiguous()
+            b_scale = b_scale.t().contiguous()
+        
+        output = _int8_gemm_lodewise_triton_or_fallback(
+            a_int8, a_scale, b_int8, b_scale, a_block_size, bias=bias
+        )
+        
+        if output.dtype != orig_dtype:
+            output = output.to(orig_dtype)
+        return output
+    
+    # Fallback
+    a = list(args)
+    if isinstance(args[0], QuantizedTensor):
+        a[0] = args[0].dequantize()
+    if isinstance(args[1], QuantizedTensor):
+        a[1] = args[1].dequantize()
+    if isinstance(args[2], QuantizedTensor):
+        a[2] = args[2].dequantize()
+    return func(*a, **kwargs)
+
+
+@register_layout_op(torch.ops.aten.view.default, "BlockWiseINT8LayoutLodeWise")
+def int8_view_lodewise(func, args, kwargs):
+    """Handle view operations for Lode-Wise INT8 tensors."""
+    input_tensor = args[0]
+    if isinstance(input_tensor, QuantizedTensor):
+        plain_input = input_tensor._qdata
+        ar = list(args)
+        ar[0] = plain_input
+        transformed = func(*ar, **kwargs)
+        return QuantizedTensor(transformed, "BlockWiseINT8LayoutLodeWise", input_tensor._layout_params)
+    return func(*args, **kwargs)
+
+
+@register_layout_op(torch.ops.aten.t.default, "BlockWiseINT8LayoutLodeWise")
+def int8_transpose_lodewise(func, args, kwargs):
+    """Handle transpose operations for Lode-Wise INT8 tensors."""
+    input_tensor = args[0]
+    if isinstance(input_tensor, QuantizedTensor):
+        plain_input = input_tensor._qdata
+        ar = list(args)
+        ar[0] = plain_input
+        transformed = func(*ar, **kwargs)
+        
+        new_layout_params = input_tensor._layout_params.copy()
+        if new_layout_params.get('is_weight', False):
+            new_layout_params['scale'] = new_layout_params['scale'].t().contiguous()
+        
+        return QuantizedTensor(transformed, "BlockWiseINT8LayoutLodeWise", new_layout_params)
+    return func(*args, **kwargs)
+
+
+@register_layout_op(torch.ops.aten.to.dtype, "BlockWiseINT8LayoutLodeWise")
+def int8_to_dtype_lodewise(func, args, kwargs):
+    """Handle dtype conversion for Lode-Wise INT8 tensors."""
+    input_tensor = args[0]
+    target_dtype = args[1] if len(args) > 1 else kwargs.get('dtype', None)
+    
+    if isinstance(input_tensor, QuantizedTensor):
+        if target_dtype == torch.int8:
+            return input_tensor
+    
     return QuantizedTensor._dequant_and_fallback(func, args, kwargs)

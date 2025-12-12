@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "convert_to_quant"
+version = "0.1.0"
+description = "Convert safetensors weights to quantized formats (FP8, INT8, NF4, FP4) with learned rounding optimization"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["quantization", "fp8", "int8", "nf4", "machine-learning", "pytorch", "comfyui"]
+dependencies = [
+    "torch>=2.1.0",
+    "safetensors>=0.4.2",
+    "tqdm",
+    "prodigy-plus-schedule-free",
+]
+
+[project.optional-dependencies]
+triton = ["triton>=2.1.0"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+convert_to_quant = "convert_to_quant.convert_to_quant:main"
+
+[project.urls]
+Repository = "https://github.com/silveroxides/convert_to_quant"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["convert_to_quant*"]

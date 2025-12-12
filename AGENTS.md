@@ -29,6 +29,15 @@ This workspace focuses on:
 
 ---
 
+## 📝 Documentation Guidelines
+
+**After completing a task**, save the walkthrough as an entry in `DEVELOPMENT.md`:
+- Add new entries at the top (reverse chronological order)
+- Include: Session Summary, Files Created/Modified, Usage examples
+- Follow the existing format in [DEVELOPMENT.md](DEVELOPMENT.md)
+
+---
+
 ## 🔧 bitsandbytes Integration Scope
 
 ### Directory Structure

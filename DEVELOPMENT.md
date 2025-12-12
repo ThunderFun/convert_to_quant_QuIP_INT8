@@ -1,5 +1,70 @@
 # Development Log
 
+## 2025-12-12: ComfyUI support_bnb_quant Branch Sync
+
+### Session Summary
+Synced `convert_to_quant/comfy/` files with ComfyUI's support_bnb_quant branch for compatibility.
+
+---
+
+### Files Synced
+
+| File | Notes |
+|------|-------|
+| `quant_ops.py` | Import changed: `import comfy.float` → `from . import float as comfy_float` |
+| `nf4_kernels.py` | Adds `NF4_CODEBOOK`, `FP4_CODEBOOK_NORMALIZED` exports |
+| `int8_kernels.py` | Synced |
+| `float.py` | Synced |
+
+### New Handlers Added
+- `int8_gelu`, `int8_transpose_int`, `int8_linear_lodewise`, `int8_view_lodewise`, `int8_transpose_lodewise`
+
+---
+
+## 2025-12-12: Package Setup for pip Installation
+
+### Session Summary
+Made `convert_to_quant` installable as a pip package with CLI entry point.
+
+---
+
+### New Files Created
+
+| File | Description |
+|------|-------------|
+| `pyproject.toml` | PEP 621 package config with CLI entry point and dependencies |
+| `setup.py` | Minimal shim for legacy pip compatibility |
+| `convert_to_quant/__init__.py` | Package init, exposes `main`, `LearnedRoundingConverter`, `convert_to_fp8_scaled` |
+| `convert_to_quant/comfy/__init__.py` | Subpackage init for ComfyUI kernels |
+
+---
+
+### Files Modified
+
+#### `convert_to_quant/convert_to_quant.py`
+- Changed `from comfy.*` → `from .comfy.*` (relative imports for package compatibility)
+
+#### `convert_to_quant/comfy/quant_ops.py`
+- Changed `from comfy.*` → relative imports (`.int8_kernels`, `.nf4_kernels`, `.float`)
+
+---
+
+### Usage
+
+```powershell
+# Activate venv and install
+.\venv\Scripts\Activate.ps1
+pip install -e .
+
+# Run via CLI
+convert_to_quant -i model.safetensors -o output.safetensors --comfy_quant
+
+# Or import as module
+from convert_to_quant import main, LearnedRoundingConverter
+```
+
+---
+
 ## 2025-12-11: NF4/FP4 Quantization Implementation & INT8 Lodewise Fix
 
 ### Session Summary

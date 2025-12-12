@@ -11,11 +11,11 @@ import math
 import json
 from torch.optim import AdamW, RAdam
 from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
-from quant_ops import BlockWiseINT8Layout, BlockWiseINT8LayoutLodeWise
+from .comfy.quant_ops import BlockWiseINT8Layout, BlockWiseINT8LayoutLodeWise
 
 # NF4/FP4 kernels
 try:
-    from kernels.nf4_kernels import (
+    from .comfy.nf4_kernels import (
         quantize_nf4,
         dequantize_nf4,
         quantize_fp4,
@@ -28,7 +28,7 @@ except ImportError:
 
 # Lode-Wise INT8 kernels (alternative INT8 quantization backend with per-output-lane scale access)
 try:
-    from kernels.int8_kernels import (
+    from .comfy.int8_kernels import (
         weight_quant as lodewise_weight_quant,
         weight_dequant as lodewise_weight_dequant,
         int8_gemm_lodewise,
