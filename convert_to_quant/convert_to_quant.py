@@ -150,8 +150,12 @@ def load_layer_config(config_path: str) -> Dict[str, Any]:
         if not isinstance(settings, dict):
             raise ValueError(f"Layer config entry '{key}' must be an object, got {type(settings).__name__}")
         
+        # skip:true entries don't need format
+        if settings.get('skip', False):
+            continue
+        
         if 'format' not in settings:
-            raise ValueError(f"Layer config entry '{key}' missing required 'format' field")
+            raise ValueError(f"Layer config entry '{key}' missing required 'format' field (or set skip:true)")
         
         fmt = settings['format']
         if fmt not in VALID_QUANT_FORMATS:
@@ -1728,6 +1732,11 @@ def convert_to_fp8_scaled(
             # Use the converter's block_size (respects custom/fallback overrides)
             layer_block_size = converter.block_size
             
+            # Determine full_precision_matrix_mult: per-layer config takes priority over global
+            layer_full_precision_mm = full_precision_matrix_mult
+            if use_layer_config and 'full_precision_matrix_mult' in layer_settings:
+                layer_full_precision_mm = layer_settings['full_precision_matrix_mult']
+            
             # Use appropriate scale key name based on format
             if is_4bit:
                 # 4-bit formats use absmax instead of weight_scale
@@ -1735,7 +1744,7 @@ def convert_to_fp8_scaled(
                 comfy_quant_tensor = create_comfy_quant_tensor(
                     "bnb_nf4" if layer_format == 'nf4' else "bnb_fp4",
                     block_size=layer_block_size,
-                    full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
+                    full_precision_matrix_mult=layer_full_precision_mm if layer_full_precision_mm else None
                 )
             elif is_int8:
                 new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
@@ -1744,7 +1753,7 @@ def convert_to_fp8_scaled(
                 comfy_quant_tensor = create_comfy_quant_tensor(
                     int8_format, 
                     block_size=layer_block_size,
-                    full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
+                    full_precision_matrix_mult=layer_full_precision_mm if layer_full_precision_mm else None
                 )
                 # Add input_scale placeholder for INT8 (required by ComfyUI)
                 new_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=SCALE_DTYPE, device='cpu')
@@ -1771,7 +1780,7 @@ def convert_to_fp8_scaled(
                 comfy_quant_tensor = create_comfy_quant_tensor(
                     fp8_format,
                     block_size=fp8_block_size,
-                    full_precision_matrix_mult=full_precision_matrix_mult if full_precision_matrix_mult else None
+                    full_precision_matrix_mult=layer_full_precision_mm if layer_full_precision_mm else None
                 )
                 # Optionally add input_scale for FP8 (uses weight_scale as reasonable default)
                 if include_input_scale:
