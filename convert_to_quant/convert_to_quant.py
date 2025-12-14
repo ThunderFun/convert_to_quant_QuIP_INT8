@@ -1625,7 +1625,190 @@ def convert_to_fp8_scaled(
     print("\n".join(summary_parts))
     print("-" * 60)
 
+def convert_fp8_scaled_to_comfy_quant(
+    input_file: str,
+    output_file: str,
+    hp_filter: Optional[str] = None,
+    full_precision_mm: bool = False,
+):
+    """
+    Convert legacy fp8_scaled format to comfy_quant format.
+    
+    This is a format conversion only - NO quantization is performed.
+    FP8 layers are detected by weight dtype (float8_e4m3fn), not by scale presence.
+    High-precision layers may have dummy .scale_weight which are removed.
+    
+    Args:
+        input_file: Path to input fp8_scaled safetensors file
+        output_file: Path to output comfy_quant safetensors file
+        hp_filter: Optional regex pattern to validate high-precision layers
+        full_precision_mm: If True, set full_precision_matrix_mult in .comfy_quant
+    """
+    print(f"Converting fp8_scaled to comfy_quant format")
+    print(f"Input: {input_file}")
+    print(f"Output: {output_file}")
+    print("-" * 60)
+    
+    # Load input tensors
+    tensors: Dict[str, torch.Tensor] = {}
+    try:
+        with safe_open(input_file, framework="pt", device='cpu') as f:
+            print(f"Loading {len(f.keys())} tensors from source file...")
+            for key in tqdm(f.keys(), desc="Loading tensors"):
+                tensors[key] = f.get_tensor(key)
+    except Exception as e:
+        print(f"FATAL: Error loading '{input_file}': {e}")
+        return
+    
+    # Verify this is an fp8_scaled model
+    if "scaled_fp8" not in tensors:
+        print("ERROR: This does not appear to be an fp8_scaled model (missing 'scaled_fp8' marker)")
+        print("       Use this mode only for legacy fp8_scaled format models.")
+        return
+    
+    print("Verified: Input is fp8_scaled format")
+    
+    # Compile hp_filter regex if provided
+    hp_pattern = None
+    if hp_filter:
+        try:
+            hp_pattern = re.compile(hp_filter)
+            print(f"High-precision filter: {hp_filter}")
+        except re.error as e:
+            print(f"ERROR: Invalid regex pattern '{hp_filter}': {e}")
+            return
+    
+    # Group tensors by layer base name
+    # Find all .weight tensors and their associated scales
+    layer_info: Dict[str, Dict[str, torch.Tensor]] = {}
+    other_tensors: Dict[str, torch.Tensor] = {}
+    
+    for key, tensor in tensors.items():
+        if key == "scaled_fp8":
+            continue  # Skip marker, will be removed
+        
+        # Parse layer and suffix
+        if key.endswith('.weight'):
+            base = key[:-len('.weight')]
+            if base not in layer_info:
+                layer_info[base] = {}
+            layer_info[base]['weight'] = tensor
+        elif key.endswith('.scale_weight'):
+            base = key[:-len('.scale_weight')]
+            if base not in layer_info:
+                layer_info[base] = {}
+            layer_info[base]['scale_weight'] = tensor
+        elif key.endswith('.scale_input'):
+            base = key[:-len('.scale_input')]
+            if base not in layer_info:
+                layer_info[base] = {}
+            layer_info[base]['scale_input'] = tensor
+        else:
+            other_tensors[key] = tensor
+    
+    # Process layers
+    output_tensors: Dict[str, torch.Tensor] = {}
+    fp8_layers = []
+    hp_layers = []
+    
+    for base_name, layer_data in tqdm(layer_info.items(), desc="Processing layers"):
+        weight = layer_data.get('weight')
+        scale_weight = layer_data.get('scale_weight')
+        scale_input = layer_data.get('scale_input')
+        
+        if weight is None:
+            # No weight tensor - just copy any scales through (unusual case)
+            if scale_weight is not None:
+                print(f"  WARNING: {base_name} has scale_weight but no weight tensor")
+                output_tensors[f"{base_name}.scale_weight"] = scale_weight
+            if scale_input is not None:
+                output_tensors[f"{base_name}.scale_input"] = scale_input
+            continue
+        
+        # Detect if this is an FP8 layer by weight dtype
+        is_fp8 = weight.dtype == TARGET_FP8_DTYPE
+        
+        if is_fp8:
+            # FP8 layer: rename scales and add .comfy_quant
+            fp8_layers.append(base_name)
+            output_tensors[f"{base_name}.weight"] = weight
+            
+            if scale_weight is not None:
+                output_tensors[f"{base_name}.weight_scale"] = scale_weight
+            else:
+                print(f"  WARNING: FP8 layer {base_name} missing scale_weight")
+            
+            # Handle scale_input -> input_scale (skip if value is 1.0)
+            if scale_input is not None:
+                if scale_input.numel() == 1 and abs(scale_input.item() - 1.0) < 1e-6:
+                    pass  # Skip dummy input_scale
+                else:
+                    output_tensors[f"{base_name}.input_scale"] = scale_input
+            
+            # Create .comfy_quant metadata
+            comfy_quant_tensor = create_comfy_quant_tensor(
+                "float8_e4m3fn",
+                block_size=None,
+                full_precision_matrix_mult=full_precision_mm if full_precision_mm else None
+            )
+            output_tensors[f"{base_name}.comfy_quant"] = comfy_quant_tensor
+            
+        else:
+            # High-precision layer: keep weight, remove dummy scales
+            hp_layers.append(base_name)
+            output_tensors[f"{base_name}.weight"] = weight
+            
+            if scale_weight is not None:
+                print(f"  Removing dummy scale_weight from high-precision layer: {base_name}")
+            if scale_input is not None:
+                print(f"  Removing dummy scale_input from high-precision layer: {base_name}")
+    
+    # Add other tensors (bias, norms, etc.)
+    for key, tensor in other_tensors.items():
+        output_tensors[key] = tensor
+    
+    # Validate hp_filter if provided
+    if hp_pattern:
+        print("\nValidating high-precision filter...")
+        violations = []
+        for base_name in fp8_layers:
+            if hp_pattern.search(base_name):
+                violations.append(base_name)
+        
+        if violations:
+            print("ERROR: The following layers matched hp-filter but are FP8 (not high-precision):")
+            for v in violations:
+                print(f"  - {v}")
+            print("\nThese layers have float8_e4m3fn weights. If they should be high-precision,")
+            print("the input model needs to be regenerated with correct layer exclusions.")
+            return
+        
+        # Report matched hp layers
+        matched_hp = [b for b in hp_layers if hp_pattern.search(b)]
+        if matched_hp:
+            print(f"  Validated {len(matched_hp)} high-precision layers match filter")
+    
+    # Summary
+    print("\n" + "-" * 60)
+    print("Conversion Summary:")
+    print(f"  FP8 layers:            {len(fp8_layers)}")
+    print(f"  High-precision layers: {len(hp_layers)}")
+    print(f"  Other tensors:         {len(other_tensors)}")
+    print(f"  Total output tensors:  {len(output_tensors)}")
+    print("-" * 60)
+    
+    # Save output
+    print(f"\nSaving to {output_file}...")
+    try:
+        os.makedirs(os.path.dirname(output_file) if os.path.dirname(output_file) else '.', exist_ok=True)
+        save_file(output_tensors, output_file)
+        print("Conversion complete!")
+    except Exception as e:
+        print(f"FATAL: Error saving file '{output_file}': {e}")
+        return
+
 def main():
+
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description=f"Convert safetensors weights to Scaled FP8 or INT8 format.")
     parser.add_argument("-i", "--input", type=str, required=True, help="Input safetensors file path.")
     parser.add_argument("-o", "--output", type=str, help="Output safetensors file path. Auto-generated if not provided.")
@@ -1694,7 +1877,37 @@ def main():
     parser.add_argument("--min_k", type=int, default=64, help="Minimum number of principal components.")
     parser.add_argument("--max_k", type=int, default=1024, help="Maximum number of principal components.")
 
+    # FP8 scaled to comfy_quant conversion mode
+    parser.add_argument("--convert-fp8-scaled", action='store_true', dest="convert_fp8_scaled",
+                        help="Convert fp8_scaled model to comfy_quant format (no quantization, just format conversion)")
+    parser.add_argument("--hp-filter", type=str, default=None, dest="hp_filter",
+                        help="Regex pattern for high-precision layers to validate (error if they have FP8 weights)")
+    parser.add_argument("--full-precision-mm", action='store_true', dest="full_precision_mm",
+                        help="Set full_precision_matrix_mult=True in .comfy_quant metadata (for --convert-fp8-scaled)")
+
     args = parser.parse_args()
+
+    # Handle fp8_scaled conversion mode first (separate workflow)
+    if args.convert_fp8_scaled:
+        if not args.output:
+            base = os.path.splitext(args.input)[0]
+            args.output = f"{base}_comfy_quant.safetensors"
+        
+        if not os.path.exists(args.input):
+            print(f"Error: Input file not found: {args.input}")
+            return
+        
+        if os.path.abspath(args.input) == os.path.abspath(args.output):
+            print("Error: Output file cannot be same as input.")
+            return
+        
+        convert_fp8_scaled_to_comfy_quant(
+            args.input,
+            args.output,
+            hp_filter=args.hp_filter,
+            full_precision_mm=args.full_precision_mm
+        )
+        return
 
     # Determine which formats require block_size
     primary_needs_block_size = args.int8 or args.nf4 or args.fp4

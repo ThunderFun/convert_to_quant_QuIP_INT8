@@ -1,6 +1,46 @@
 # Development Log
 
+## 2025-12-14: FP8 Scaled to Comfy Quant Conversion Mode
+
+### Session Summary
+Added `--convert-fp8-scaled` mode for offline conversion of legacy `fp8_scaled` format to `comfy_quant` format.
+
+---
+
+### Problem
+ComfyUI's `utils.py::convert_old_quants()` incorrectly converts high-precision layers with dummy `.scale_weight` to FP8. This offline conversion tool does it correctly by detecting FP8 layers purely by **weight dtype** (`float8_e4m3fn`).
+
+### CLI Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `--convert-fp8-scaled` | Enable conversion mode (no quantization, format only) |
+| `--hp-filter REGEX` | Validate matched layers are high-precision (error if FP8) |
+| `--full-precision-mm` | Set `full_precision_matrix_mult=True` in .comfy_quant metadata |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `convert_to_quant/convert_to_quant.py` | Added `convert_fp8_scaled_to_comfy_quant()` function and CLI args |
+
+### Usage
+
+```bash
+# Basic conversion
+convert_to_quant -i old_model.safetensors --convert-fp8-scaled -o new_model.safetensors
+
+# With high-precision validation
+convert_to_quant -i model.safetensors --convert-fp8-scaled --hp-filter=".*final_layer.*" -o out.safetensors
+
+# With full precision matrix mult flag
+convert_to_quant -i model.safetensors --convert-fp8-scaled --full-precision-mm -o out.safetensors
+```
+
+---
+
 ## 2025-12-14: FP8 Row-wise & Block-wise Layouts + ComfyUI Fork Sync
+
 
 ### Session Summary
 Implemented two new FP8 scaling modes in `convert_to_quant` and fully synced `quant_ops.py` to ComfyUI fork (`support_additional_fp8` branch).
