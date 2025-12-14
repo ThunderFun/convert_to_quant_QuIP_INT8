@@ -1247,7 +1247,8 @@ def convert_to_fp8_scaled(
     radiance: bool, wan: bool, qwen: bool, hunyuan: bool, zimage: bool, zimage_refiner: bool, calib_samples: int, seed: int,
     int8: bool = False, nf4: bool = False, fp4: bool = False,
     fallback: Optional[str] = None, custom_layers: Optional[str] = None, custom_type: Optional[str] = None,
-    custom_block_size: Optional[int] = None, custom_simple: bool = False, custom_heur: bool = False,
+    custom_block_size: Optional[int] = None, custom_scaling_mode: Optional[str] = None,
+    custom_simple: bool = False, custom_heur: bool = False,
     fallback_block_size: Optional[int] = None, fallback_simple: bool = False,
     full_precision_matrix_mult: bool = False, skip_inefficient_layers: bool = False,
     include_input_scale: bool = False, no_learned_rounding: bool = False,
@@ -1348,10 +1349,13 @@ def convert_to_fp8_scaled(
         custom_overrides = {}
         if custom_block_size is not None:
             custom_overrides['block_size'] = custom_block_size
+        if custom_scaling_mode is not None:
+            custom_overrides['scaling_mode'] = custom_scaling_mode
         if custom_simple:
             custom_overrides['no_learned_rounding'] = True
         converters['custom'] = create_converter_for_format(custom_type, custom_overrides if custom_overrides else None)
         override_note = f" (block_size={custom_block_size})" if custom_block_size else ""
+        override_note += f" (scaling_mode={custom_scaling_mode})" if custom_scaling_mode else ""
         override_note += " (simple)" if custom_simple else ""
         print(f"Custom layer quantization enabled: {custom_type.upper()}{override_note} for pattern '{custom_layers}'")
     
@@ -1826,6 +1830,9 @@ def main():
     # Custom-type parameter overrides
     parser.add_argument("--custom-block-size", type=int, default=None, dest="custom_block_size",
                         help="Block size for custom-type layers (default: inherit --block_size)")
+    parser.add_argument("--custom-scaling-mode", type=str, default=None, dest="custom_scaling_mode",
+                        choices=["tensor", "row", "block", "block2d"],
+                        help="FP8 scaling mode for custom-type layers (default: inherit --scaling_mode)")
     parser.add_argument("--custom-simple", action='store_true', dest="custom_simple",
                         help="Use simple quantization for custom-type layers")
     parser.add_argument("--custom-heur", action='store_true', dest="custom_heur",
@@ -1988,7 +1995,7 @@ def main():
     excluded_keys = ['input', 'output', 'comfy_quant', 't5xxl', 'mistral', 'distillation_large', 'distillation_small', 
                      'nerf_large', 'nerf_small', 'radiance', 'wan', 'qwen', 'hunyuan', 'zimage', 'zimage_refiner',
                      'calib_samples', 'manual_seed', 'int8', 'nf4', 'fp4', 'fallback', 'custom_layers', 'custom_type',
-                     'custom_block_size', 'custom_simple', 'custom_heur', 'fallback_block_size', 'fallback_simple',
+                     'custom_block_size', 'custom_scaling_mode', 'custom_simple', 'custom_heur', 'fallback_block_size', 'fallback_simple',
                      'full_precision_matrix_mult', 'heur', 'input_scale', 'simple']
     converter_kwargs = {k: v for k, v in vars(args).items() if k not in excluded_keys}
 
@@ -1998,7 +2005,8 @@ def main():
         args.radiance, args.wan, args.qwen, args.hunyuan, args.zimage, args.zimage_refiner, args.calib_samples, seed,
         int8=args.int8, nf4=args.nf4, fp4=args.fp4,
         fallback=args.fallback, custom_layers=args.custom_layers, custom_type=args.custom_type,
-        custom_block_size=args.custom_block_size, custom_simple=args.custom_simple, custom_heur=args.custom_heur,
+        custom_block_size=args.custom_block_size, custom_scaling_mode=args.custom_scaling_mode,
+        custom_simple=args.custom_simple, custom_heur=args.custom_heur,
         fallback_block_size=args.fallback_block_size, fallback_simple=args.fallback_simple,
         full_precision_matrix_mult=args.full_precision_matrix_mult,
         skip_inefficient_layers=args.heur,

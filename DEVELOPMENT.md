@@ -1,5 +1,11 @@
 # Development Log
 
+## 2025-12-14: Custom Scaling Mode for Mixed Precision FP8
+
+Added `--custom-scaling-mode {tensor,row,block,block2d}` to override FP8 scaling mode for custom-type layers, enabling mixed precision like tensor scaling for primary layers + block2d for specific layers.
+
+---
+
 ## 2025-12-14: FP8 Scaled to Comfy Quant Conversion Mode
 
 ### Session Summary
