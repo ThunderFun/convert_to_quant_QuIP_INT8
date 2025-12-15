@@ -7,7 +7,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from typing import Dict, Tuple, Optional, Any
 from tqdm import tqdm
-import fnmatch
+# fnmatch removed - using regex for layer config patterns
 import gc
 import math
 import json
@@ -97,12 +97,12 @@ VALID_QUANT_FORMATS = {
 
 def pattern_specificity(pattern: str) -> tuple:
     """
-    Calculate specificity score for a pattern.
+    Calculate specificity score for a regex pattern.
     Higher score = more specific pattern.
     
     Priority rules:
-    1. Tier 0 (highest): Pattern has numbers AND 8+ non-wildcard chars
-    2. Tier 1: Longer non-wildcard length, bonus for internal matches (*pattern*)
+    1. Tier 0 (highest): Pattern has explicit numbers (\d or literal digits) AND 8+ literal chars
+    2. Tier 1: Longer literal length
     
     Returns:
         (tier, score) tuple for sorting - lower tier and higher score = more specific
@@ -110,28 +110,32 @@ def pattern_specificity(pattern: str) -> tuple:
     if pattern.startswith('_'):
         return (999, 0)  # Special keys like _default have lowest priority
     
-    has_number = any(c.isdigit() for c in pattern)
-    non_wildcard_len = len(pattern.replace('*', ''))
-    is_internal = pattern.startswith('*')  # Internal match bonus
+    # Count literal characters (exclude regex metacharacters)
+    # Remove common regex patterns to get approximate literal length
+    literal_pattern = re.sub(r'\\.|\[.*?\]|\(.*?\)|[.*+?^${}|\\]', '', pattern)
+    literal_len = len(literal_pattern)
     
-    # Tier 0: numbers + 8+ non-wildcard chars (very specific layers)
-    tier = 0 if (has_number and non_wildcard_len >= 8) else 1
+    # Check if pattern has explicit numbers (literal digits or \d patterns)
+    has_number = bool(re.search(r'\d|\\d', pattern))
     
-    # Score: non-wildcard length + bonus for internal matches
-    internal_bonus = 10 if is_internal else 0
-    return (tier, non_wildcard_len + internal_bonus)
+    # Tier 0: numbers + 8+ literal chars (very specific layers)
+    tier = 0 if (has_number and literal_len >= 8) else 1
+    
+    return (tier, literal_len)
 
 
 def load_layer_config(config_path: str) -> Dict[str, Any]:
     """
     Load and validate layer configuration from JSON file.
     
+    Patterns are now regex patterns (using re.search matching).
+    
     Raises:
         FileNotFoundError: If config file doesn't exist
-        ValueError: If config has invalid format or unknown quant format
+        ValueError: If config has invalid format, unknown quant format, or invalid regex
     
     Returns:
-        Validated config dict
+        Validated config dict with compiled regex patterns
     """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Layer config file not found: {config_path}")
@@ -142,13 +146,28 @@ def load_layer_config(config_path: str) -> Dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError(f"Layer config must be a JSON object, got {type(config).__name__}")
     
-    # Validate each entry
+    # Validate each entry and compile regex patterns
+    compiled_patterns = {}
     for key, settings in config.items():
         if key.startswith('_'):
-            continue  # Skip special keys like _default, _exclusions
+            # Validate _default has valid format if format is specified
+            if key == '_default' and isinstance(settings, dict):
+                if 'format' in settings:
+                    fmt = settings['format']
+                    if not fmt:  # Empty string check
+                        raise ValueError(f"_default has empty 'format' field. Use skip:true to skip, or specify a valid format.")
+                    if fmt not in VALID_QUANT_FORMATS:
+                        raise ValueError(f"_default has invalid format '{fmt}'. Valid formats: {sorted(VALID_QUANT_FORMATS)}")
+            continue
         
         if not isinstance(settings, dict):
             raise ValueError(f"Layer config entry '{key}' must be an object, got {type(settings).__name__}")
+        
+        # Validate regex pattern
+        try:
+            compiled_patterns[key] = re.compile(key)
+        except re.error as e:
+            raise ValueError(f"Layer config entry '{key}' has invalid regex pattern: {e}")
         
         # skip:true entries don't need format
         if settings.get('skip', False):
@@ -158,23 +177,28 @@ def load_layer_config(config_path: str) -> Dict[str, Any]:
             raise ValueError(f"Layer config entry '{key}' missing required 'format' field (or set skip:true)")
         
         fmt = settings['format']
+        if not fmt:  # Empty string check
+            raise ValueError(f"Layer config entry '{key}' has empty 'format' field. Use skip:true to skip, or specify a valid format.")
         if fmt not in VALID_QUANT_FORMATS:
             raise ValueError(
                 f"Layer config entry '{key}' has invalid format '{fmt}'. "
                 f"Valid formats: {sorted(VALID_QUANT_FORMATS)}"
             )
     
-    print(f"Loaded layer config with {len([k for k in config if not k.startswith('_')])} layer patterns")
+    # Store compiled patterns in config for reuse
+    config['_compiled_patterns'] = compiled_patterns
+    
+    print(f"Loaded layer config with {len([k for k in config if not k.startswith('_')])} layer patterns (regex mode)")
     return config
 
 
 def get_layer_settings(layer_key: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Find the most specific matching config entry for a layer.
+    Find the most specific matching config entry for a layer using regex.
     
     Args:
         layer_key: Full layer name (e.g., "double_blocks.0.img_attn.proj.weight")
-        config: Layer config dict
+        config: Layer config dict (with _compiled_patterns from load_layer_config)
     
     Returns:
         Settings dict for the layer, or None if no match and no _default
@@ -182,12 +206,24 @@ def get_layer_settings(layer_key: str, config: Dict[str, Any]) -> Optional[Dict[
     # Strip .weight suffix for matching
     base_key = layer_key[:-7] if layer_key.endswith('.weight') else layer_key
     
-    # Find all matching patterns
+    # Get compiled patterns (or compile on demand for backwards compatibility)
+    compiled_patterns = config.get('_compiled_patterns', {})
+    
+    # Find all matching patterns using regex
     matches = []
     for pattern, settings in config.items():
         if pattern.startswith('_'):
             continue
-        if fnmatch.fnmatch(base_key, pattern):
+        
+        # Use pre-compiled pattern if available, otherwise compile
+        regex = compiled_patterns.get(pattern)
+        if regex is None:
+            try:
+                regex = re.compile(pattern)
+            except re.error:
+                continue  # Skip invalid patterns
+        
+        if regex.search(base_key):
             specificity = pattern_specificity(pattern)
             matches.append((specificity, pattern, settings))
     
@@ -2138,7 +2174,15 @@ def main():
 
     # Per-layer quantization config (JSON file)
     parser.add_argument("--layer-config", type=str, default=None, dest="layer_config",
-                        help="Path to JSON file with per-layer quantization settings. See MANUAL.md for format.")
+                        help="""Path to JSON file with per-layer quantization settings (regex patterns).
+Example config:
+{
+  "_default": {"format": "float8_e4m3fn"},
+  "attn": {"format": "float8_e4m3fn", "full_precision_matrix_mult": true},
+  "\\\\.0\\\\.img_mod": {"skip": true}
+}
+Patterns use Python regex (re.search). In JSON, backslashes must be doubled (\\\\. for literal dot).
+See DEVELOPMENT.md for migration guide from fnmatch patterns.""")
 
     # Dry run / template generation
     parser.add_argument("--dry-run", type=str, nargs='?', const='analyze', default=None, dest="dry_run",

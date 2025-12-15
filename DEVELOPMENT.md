@@ -1,5 +1,46 @@
 # Development Log
 
+## 2025-12-15: Regex Pattern Matching for Layer Config
+
+### Changes
+- **Switched from fnmatch to regex**: Layer config patterns now use Python `re.search()` instead of `fnmatch.fnmatch()`
+- **Empty format validation**: Added validation to reject empty `"format": ""` strings (must use `skip: true` or valid format)
+- **Pattern compilation**: Regex patterns are compiled and validated at config load time
+
+### Why Regex?
+The fnmatch glob patterns were confusing and didn't match intuitively:
+- `*.attn*` did NOT match `double_blocks.0.img_attn.proj` (fnmatch `*` doesn't match `.` the way users expect)
+- `*.0.img_mod*` worked but was inconsistent with other patterns
+
+Regex is more predictable: `re.search(pattern, layer_name)` matches the pattern anywhere in the layer name.
+
+### Migration Guide
+Old fnmatch patterns → New regex patterns (shown as JSON strings):
+
+| Old (fnmatch) | New (regex in JSON) | Notes |
+|---------------|---------------------|-------|
+| `*.attn*` | `"attn"` | Match "attn" anywhere |
+| `*.0.img_mod*` | `"\\.0\\.img_mod"` | Escape dots for literal `.` |
+| `img_in` | `"^img_in$"` | Use anchors for exact match |
+| `*.txt_mlp.*` | `"\\.txt_mlp\\."` | Escape dots |
+
+### Example Config
+```json
+{
+  "_default": {"format": "float8_e4m3fn"},
+  "attn": {"format": "float8_e4m3fn", "full_precision_matrix_mult": true},
+  "\\.0\\.img_mod": {"skip": true},
+  "^img_in$": {"skip": true}
+}
+```
+
+> **JSON Escaping**: Backslashes must be doubled in JSON strings.
+> - Regex `\.` (literal dot) → JSON `"\\."`
+> - Regex `\d` (digit) → JSON `"\\d"`
+> - Regex `\w` (word char) → JSON `"\\w"`
+
+---
+
 ## 2025-12-14: JSON Layer Config for Per-Layer Quantization
 
 Added `--layer-config PATH` and `--dry-run create-template`:
