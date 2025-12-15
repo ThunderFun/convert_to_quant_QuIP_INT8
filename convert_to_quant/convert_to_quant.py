@@ -575,7 +575,7 @@ class LearnedRoundingConverter:
         worse_loss_counter = 0
         plateau_counter = 0  # For plateau schedule
         cooldown_counter = 0  # For plateau cooldown
-        curr_lr = self.optimizer_kwargs.get('lr', 0.5)
+        curr_lr = self.optimizer_kwargs.get('lr', 8.077300000003e-3)
         if W_float32.shape[0] == W_float32.shape[1]:
             small_mult = 0.95
         else:
@@ -1032,71 +1032,118 @@ class LearnedRoundingConverter:
         best_loss = float('inf')
         best_tensor = None
         worse_loss_counter = 0
-        curr_lr = self.optimizer_kwargs.get('lr', 0.5)
-        
+        plateau_counter = 0  # For plateau schedule
+        cooldown_counter = 0  # For plateau cooldown
+        curr_lr = self.optimizer_kwargs.get('lr', 8.077300000003e-3)
         if M == N:
             small_mult = 0.95
         else:
             small_mult = 1.0
-        
-        pbar = tqdm(range(self.num_iter), desc="    Optimizing INT8 (Original)", leave=False, dynamic_ncols=True)
+
+        schedule_name = self.lr_schedule
+        pbar = tqdm(range(self.num_iter), desc=f"    Optimizing INT8 (Original-{schedule_name})", leave=False, dynamic_ncols=True)
         for i in pbar:
             with torch.no_grad():
                 current_dq = self._int8_dequantize_blockwise(q_refined, scale, M, N, block_size)
                 error = current_dq - W_float32
                 projected_error = U_k.T @ error @ Vh_k.T
                 loss = torch.linalg.norm(projected_error)
+
+            current_loss = loss.item()
+            # Check if improvement exceeds threshold
+            improvement = best_loss - current_loss
+            improved = improvement > self.lr_threshold if self.lr_threshold > 0 else current_loss < best_loss
             
-            # Adaptive learning rate logic (same as FP8 original optimizer)
-            if loss.item() < best_loss and worse_loss_counter < 50:
-                best_loss = loss.item()
+            # Store counter before potential reset (for no-reset adaptive mode)
+            prev_worse_counter = worse_loss_counter
+
+            if improved:
+                best_loss = current_loss
                 best_tensor = q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.25 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 49 and worse_loss_counter < 75:
-                best_loss = loss.item()
-                best_tensor = q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.375 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 74 and worse_loss_counter < 100:
-                best_loss = loss.item()
-                best_tensor = q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.5 * small_mult), 100.0)
-            elif loss.item() < best_loss and worse_loss_counter > 99:
-                best_loss = loss.item()
-                best_tensor = q_refined.clone()
-                worse_loss_counter = 0
-                curr_lr = min(curr_lr * (1.75 * small_mult), 100.0)
-            elif loss.item() > best_loss and worse_loss_counter < 26:
+                plateau_counter = 0
+                if self.lr_adaptive_mode == 'simple-reset':
+                    worse_loss_counter = 0
+                # no-reset mode: worse_loss_counter preserved for tier calculation
+            else:
                 worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.95 * small_mult), 9e-8)
-            elif worse_loss_counter > 25 and worse_loss_counter < 51:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.97 * small_mult), 8e-8)
-            elif worse_loss_counter > 50 and worse_loss_counter < 76:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.985 * small_mult), 7e-8)
-            elif worse_loss_counter > 75 and worse_loss_counter < 101:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.9875 * small_mult), 6e-8)
-            elif worse_loss_counter > 100:
-                worse_loss_counter += 1
-                curr_lr = max(curr_lr * (0.99 * small_mult), 5e-8)
-            
-            pbar.set_postfix({"loss": f"{loss.item():.3e}", "best": f"{best_loss:.3e}", "lr": f"{curr_lr:.2e}", "worse_count": f"{worse_loss_counter}"})
-            
-            if loss.item() < 1e-8 or curr_lr < 1e-08 or worse_loss_counter > 500:
+                plateau_counter += 1
+
+            # LR update based on schedule
+            if schedule_name == 'exponential':
+                # ExponentialLR: lr = lr * gamma per step
+                curr_lr = max(curr_lr * self.lr_gamma, self.lr_min)
+            elif schedule_name == 'plateau':
+                # ReduceLROnPlateau with cooldown
+                if cooldown_counter > 0:
+                    cooldown_counter -= 1
+                elif plateau_counter >= self.lr_patience:
+                    if curr_lr > self.lr_min:
+                        curr_lr = max(curr_lr * self.lr_factor, self.lr_min)
+                        cooldown_counter = self.lr_cooldown
+                    plateau_counter = 0
+            else:  # 'adaptive' - tier-based schedule
+                # For no-reset mode, use counter value before reset for tier calculation
+                counter_for_tier = prev_worse_counter if (improved and self.lr_adaptive_mode == 'no-reset') else worse_loss_counter
+                
+                if improved and counter_for_tier < 50:
+                    curr_lr = min(curr_lr * (1.25 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 50 and counter_for_tier < 75:
+                    curr_lr = min(curr_lr * (1.375 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 75 and counter_for_tier < 100:
+                    curr_lr = min(curr_lr * (1.5 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 100 and counter_for_tier < 125:
+                    curr_lr = min(curr_lr * (1.75 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 125 and counter_for_tier < 150:
+                    curr_lr = min(curr_lr * (2.0 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 150 and counter_for_tier < 200:
+                    curr_lr = min(curr_lr * (2.25 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 200 and counter_for_tier < 250:
+                    curr_lr = min(curr_lr * (2.5 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 250 and counter_for_tier < 300:
+                    curr_lr = min(curr_lr * (2.75 * small_mult), 100.0)
+                elif improved and counter_for_tier >= 300:
+                    curr_lr = min(curr_lr * (3.0 * small_mult), 100.0)
+                elif not improved and worse_loss_counter < 26:
+                    curr_lr = max(curr_lr * (0.95 * small_mult), 9e-8)
+                elif worse_loss_counter >= 26 and worse_loss_counter < 51:
+                    curr_lr = max(curr_lr * (0.97 * small_mult), 8e-8)
+                elif worse_loss_counter >= 51 and worse_loss_counter < 76:
+                    curr_lr = max(curr_lr * (0.985 * small_mult), 7e-8)
+                elif worse_loss_counter >= 76 and worse_loss_counter < 101:
+                    curr_lr = max(curr_lr * (0.9875 * small_mult), 6e-8)
+                elif worse_loss_counter >= 101 and worse_loss_counter < 151:
+                    curr_lr = max(curr_lr * (0.98875 * small_mult), 5e-8)
+                elif worse_loss_counter >= 151 and worse_loss_counter < 201:
+                    curr_lr = max(curr_lr * (0.99 * small_mult), 4e-8)
+                elif worse_loss_counter >= 201 and worse_loss_counter < 251:
+                    curr_lr = max(curr_lr * (0.99125 * small_mult), 3e-8)
+                elif worse_loss_counter >= 251 and worse_loss_counter < 301:
+                    curr_lr = max(curr_lr * (0.9925 * small_mult), 2e-8)
+                else:  # worse_loss_counter >= 301
+                    curr_lr = max(curr_lr * (0.995 * small_mult), 5e-9)
+                
+                # Reset counter after boost in no-reset mode
+                if improved and self.lr_adaptive_mode == 'no-reset':
+                    worse_loss_counter = 0
+
+            pbar.set_postfix({"loss": f"{current_loss:.3e}", "best": f"{best_loss:.3e}", "lr": f"{curr_lr:.2e}", "worse_count": f"{worse_loss_counter}"})
+        
+            # Early stopping conditions
+            if current_loss < 1e-8 or curr_lr < 1e-08 or worse_loss_counter > 500:
                 if curr_lr < 1.75e-08 and worse_loss_counter > 450:
                     print("      - Loss has stalled and learning rate has bottomed out. Stopping.")
-                elif loss.item() < 1e-8:
+                elif current_loss < 1e-8 and curr_lr < 1.75e-8:
+                    print("      - Learning Rate has bottomed out and loss is negligible. Stopping.")
+                elif worse_loss_counter > 450 and current_loss > 2e-8:
+                    print("      - Loss is negligible and loss has stalled. Stopping.")
+                elif current_loss < 1e-8:
                     print("      - Loss is negligible. Stopping.")
                 elif curr_lr < 1e-08:
                     print("      - Learning Rate has bottomed out. Stopping.")
                 elif worse_loss_counter > 500:
                     print("      - Loss has stalled. Stopping.")
                 break
-            
+        
             with torch.no_grad():
                 # Compute gradient direction in INT8 quantized space
                 # 
@@ -2158,10 +2205,10 @@ def main():
     parser.add_argument("--lr_schedule", type=str, default="adaptive", choices=["adaptive", "exponential", "plateau"],
                         help="LR schedule for 'original' optimizer: 'adaptive' (default custom), 'exponential' (gamma decay), 'plateau' (reduce on stall)")
     parser.add_argument("--lr_gamma", type=float, default=0.99, help="[exponential] Decay factor per step (default: 0.99)")
-    parser.add_argument("--lr_patience", type=int, default=10, help="[plateau] Steps before decay")
-    parser.add_argument("--lr_factor", type=float, default=0.8, help="[plateau] LR reduction factor")
-    parser.add_argument("--lr_min", type=float, default=1e-9, help="[plateau] Minimum LR bound")
-    parser.add_argument("--lr_cooldown", type=int, default=5, help="[plateau] Steps to wait after reduction")
+    parser.add_argument("--lr_patience", type=int, default=9, help="[plateau] Steps before decay")
+    parser.add_argument("--lr_factor", type=float, default=0.92, help="[plateau] LR reduction factor")
+    parser.add_argument("--lr_min", type=float, default=1e-10, help="[plateau] Minimum LR bound")
+    parser.add_argument("--lr_cooldown", type=int, default=6, help="[plateau] Steps to wait after reduction")
     parser.add_argument("--lr_threshold", type=float, default=0.0, help="[plateau] Min improvement to reset patience")
     parser.add_argument("--lr_adaptive_mode", type=str, default="simple-reset", choices=["simple-reset", "no-reset"],
                         help="[adaptive] Counter reset behavior (see MANUAL.md)")

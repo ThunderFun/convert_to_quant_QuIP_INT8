@@ -1,5 +1,49 @@
 # Development Log
 
+## 2025-12-15: INT8 Optimizer LR Schedule Parity
+
+### Session Summary
+Fixed `_optimize_int8_original` to match `_optimize_original` (FP8) LR schedule implementation, and unified the `--lr` default fallback value.
+
+---
+
+### Changes
+
+#### LR Default Fallback Fix
+The `.get('lr', 0.5)` fallback was inconsistent with CLI default `8.077300000003e-3`:
+- Updated `_optimize_original` line 578
+- Updated `_optimize_int8_original` line 1035
+
+#### LR Schedule Port (INT8)
+`_optimize_int8_original` was missing all LR schedule features. Now supports:
+
+| Feature | Before | After |
+|---------|--------|-------|
+| `--lr_schedule exponential` | ❌ | ✅ |
+| `--lr_schedule plateau` | ❌ | ✅ |
+| `--lr_schedule adaptive` | 4 tiers | 9 tiers |
+| `--lr_adaptive_mode` | ❌ | ✅ |
+| `--lr_threshold` | ❌ | ✅ |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `convert_to_quant/convert_to_quant.py` | Fixed LR fallback; ported full LR schedule to `_optimize_int8_original` |
+
+### Usage
+```bash
+# INT8 with plateau schedule
+convert_to_quant -i model.safetensors --int8 --block_size 128 --comfy_quant \
+    --optimizer original --lr_schedule plateau --lr_patience 9 --lr_factor 0.92
+
+# INT8 with exponential schedule
+convert_to_quant -i model.safetensors --int8 --block_size 128 --comfy_quant \
+    --optimizer original --lr_schedule exponential --lr_gamma 0.95
+```
+
+---
+
 ## 2025-12-15: Regex Pattern Matching for Layer Config
 
 ### Changes
