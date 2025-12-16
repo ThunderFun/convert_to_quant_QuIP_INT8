@@ -1,5 +1,41 @@
 # Development Log
 
+## 2025-12-16: CRITICAL FIX - FP8 Quantization Quality Degradation
+
+### Session Summary
+Removed 4 incorrect `.clamp_()` operations that were NOT in the original reference script and were causing quality degradation.
+
+---
+
+### The Bug
+
+In `_convert_fp8()` after each optimizer call, there was an added clamp:
+```python
+final_tensor_scaled = self._optimize_original(W_float32, scale, U_k, Vh_k)
+final_tensor_scaled.clamp_(-self.f8_max_val, self.f8_max_val)  # WRONG!
+```
+
+The reference script (`reference_for_tensor_float8_e4m3fn.py`) does NOT have this clamp.
+
+### Why This Caused Issues
+
+1. The scale is computed to map tensor values into FP8 range
+2. The optimizer explores slightly outside the range during gradient descent
+3. Clamping destroys the learned rounding corrections
+4. PyTorch's `.to(float8_e4m3fn)` already handles saturation naturally
+
+### Fix
+
+Removed all 4 clamp operations from lines 1307, 1310, 1313, 1316.
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `convert_to_quant/convert_to_quant.py` | Removed 4 clamp operations after optimizer calls |
+
+---
+
 ## 2025-12-16: README.md Rewrite
 
 ### Session Summary

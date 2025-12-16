@@ -1304,16 +1304,12 @@ class LearnedRoundingConverter:
 
         if self.optimizer_choice == 'ppsf':
             final_tensor_scaled = self._optimize_ppsf(W_float32, scale, U_k, Vh_k)
-            final_tensor_scaled.clamp_(-self.f8_max_val, self.f8_max_val)
         elif self.optimizer_choice == 'adamw':
             final_tensor_scaled = self._optimize_adamw(W_float32, scale, U_k, Vh_k)
-            final_tensor_scaled.clamp_(-self.f8_max_val, self.f8_max_val)
         elif self.optimizer_choice == 'radam':
             final_tensor_scaled = self._optimize_radam(W_float32, scale, U_k, Vh_k)
-            final_tensor_scaled.clamp_(-self.f8_max_val, self.f8_max_val)
         elif self.optimizer_choice == 'original':
             final_tensor_scaled = self._optimize_original(W_float32, scale, U_k, Vh_k)
-            final_tensor_scaled.clamp_(-self.f8_max_val, self.f8_max_val)
         else:
             raise ValueError(f"Unknown optimizer: '{self.optimizer_choice}'")
 
