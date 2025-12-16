@@ -1,5 +1,29 @@
 # Development Log
 
+## 2025-12-16: README.md Rewrite
+
+### Session Summary
+Rewrote README.md to reflect current project state and added GPU-specific PyTorch installation instructions.
+
+---
+
+### Changes
+
+- **Installation section**: Added PyTorch prerequisite with CUDA version-specific pip commands
+- **Package structure**: Updated to reflect actual `convert_to_quant/` package layout
+- **Supported formats**: Added NF4 and FP4 to format table
+- **Model presets**: Added Z-Image refiner and updated flag names
+- **Key features**: Added layer config JSON, LR schedules, three-tier quantization
+- **Advanced usage**: Added sections for layer config, scaling modes, and help commands
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `README.md` | Complete rewrite with current features, proper installation flow |
+
+---
+
 ## 2025-12-16: CLI Help Restructuring
 
 ### Session Summary

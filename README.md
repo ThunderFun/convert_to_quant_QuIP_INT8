@@ -1,89 +1,130 @@
-# Learned Rounding Quantization - Development Workspace
+# convert_to_quant
 
-**Research and development workspace for neural network quantization methods targeting ComfyUI inference.**
+**Convert safetensors weights to quantized formats (FP8, INT8, NF4, FP4) with learned rounding optimization for ComfyUI inference.**
 
-This workspace develops quantization algorithms that convert PyTorch model weights from full precision to low-precision formats (FP8, INT8) using SVD-based learned rounding optimization. The output is ComfyUI-compatible quantized models.
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
-## For Developers
+## Installation
 
-**Working on quantization methods?** Start here:
+> [!IMPORTANT]
+> **PyTorch must be installed first** with the correct CUDA version for your GPU.
+> This package does not install PyTorch automatically to avoid conflicts with your existing setup.
 
-- 📋 **[AGENTS.md](AGENTS.md)** - Development workflows and quick reference for AI coding agents
-- ✨ **[ACTIVE.md](ACTIVE.md)** - Current implementations and active development status
-- 📋 **[PLANNED.md](PLANNED.md)** - Roadmap and planned features
-- 🏗️ **[.github/copilot-instructions.md](.github/copilot-instructions.md)** - Complete architecture, patterns, and technical details
-- 🧪 **[DEVELOPMENT.md](DEVELOPMENT.md)** - Experimental findings and research notes
-- 🔗 **[quantization.examples.md](quantization.examples.md)** - ComfyUI integration patterns
-- 📚 **[ComfyUI_Custom_Nodes_Agent/](ComfyUI_Custom_Nodes_Agent/)** - Reference for ComfyUI development patterns
-- 🔍 **[ComfyUI/](ComfyUI/)** - ComfyUI source code reference
+### Step 1: Install PyTorch (GPU-specific)
 
-### Quick Start
+Visit [pytorch.org](https://pytorch.org/get-started/locally/) to get the correct install command for your system.
+
+**Examples:**
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/silveroxides/convert_to_quant.git
+# CUDA 12.1 (most common)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 
-# Install dependencies
-pip install -r requirements.txt
+# CUDA 12.4
+pip install torch --index-url https://download.pytorch.org/whl/cu124
 
-# Test quantization
-python convert_to_quant.py -i test_model.safetensors --comfy_quant
+# CUDA 11.8 (older GPUs)
+pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+# CPU only (no GPU acceleration)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-### Development Focus
+### Step 2: Install convert_to_quant
 
-- **Quantization algorithms**: SVD-based learned rounding, custom optimizers
-- **Format support**: FP8 (tensor cores) and INT8 (block-wise)
-- **Model architectures**: Flux, T5-XXL, Hunyuan Video, WAN, and more
-- **ComfyUI integration**: Compatible quantized model generation
+```bash
+# Install from PyPI (when available)
+pip install convert_to_quant
+
+# Or install from source
+git clone https://github.com/silveroxides/convert_to_quant.git
+cd convert_to_quant
+pip install -e .
+```
+
+### Optional: Triton (recommended for INT8)
+
+```bash
+pip install triton>=2.1.0
+```
 
 ---
 
-## For Users
-
-**Using quantized models?** See the user documentation:
-
-- 📖 **[MANUAL.md](MANUAL.md)** - Complete usage guide with examples and troubleshooting
-
-### Quick Usage
+## Quick Start
 
 ```bash
-# Basic FP8 quantization
-python convert_to_quant.py -i model.safetensors --comfy_quant
+# Basic FP8 quantization (default)
+convert_to_quant -i model.safetensors --comfy_quant
 
 # INT8 with performance heuristics
-python convert_to_quant.py -i model.safetensors --int8 --comfy_quant --heur
+convert_to_quant -i model.safetensors --int8 --comfy_quant --heur
+
+# NF4 4-bit quantization
+convert_to_quant -i model.safetensors --nf4 --comfy_quant
 
 # T5-XXL text encoder
-python convert_to_quant.py -i t5xxl.safetensors --t5xxl --comfy_quant
+convert_to_quant -i t5xxl.safetensors --t5xxl --comfy_quant
 
-# High quality (slow)
-python convert_to_quant.py -i model.safetensors --comfy_quant --num_iter 2000
+# High quality (more iterations)
+convert_to_quant -i model.safetensors --comfy_quant --num_iter 2000
 ```
 
 Load the output `.safetensors` file in ComfyUI like any other model.
 
 ---
 
+## Supported Quantization Formats
+
+| Format | Flag | Hardware | Notes |
+|--------|------|----------|-------|
+| FP8 (E4M3) | *(default)* | Ada Lovelace+ | Tensor core acceleration |
+| INT8 Block-wise | `--int8` | Broad support | Good balance of quality/speed |
+| NF4 4-bit | `--nf4` | Broad support | Maximum compression |
+| FP4 4-bit | `--fp4` | Broad support | Experimental |
+
+---
+
+## Model-Specific Presets
+
+| Model | Flag | Notes |
+|-------|------|-------|
+| Flux / Flux-Dev | `--distillation_large` / `--nerf_large` | Distillation layers excluded |
+| T5-XXL Text Encoder | `--t5xxl` | Decoder removed |
+| Hunyuan Video | `--hunyuan` | Attention norms excluded |
+| WAN Video | `--wan` | Time embeddings excluded |
+| Qwen Image | `--qwen` | Image layers excluded |
+| Z-Image | `--zimage` / `--zimage_refiner` | Vision encoder specific |
+
+---
+
+## Documentation
+
+- 📖 **[MANUAL.md](MANUAL.md)** - Complete usage guide with examples and troubleshooting
+- 📋 **[AGENTS.md](AGENTS.md)** - Development workflows for AI coding agents
+- ✨ **[ACTIVE.md](ACTIVE.md)** - Current implementations and status
+- 📋 **[PLANNED.md](PLANNED.md)** - Roadmap and planned features
+- 🧪 **[DEVELOPMENT.md](DEVELOPMENT.md)** - Research notes and findings
+- 🔗 **[quantization.examples.md](quantization.examples.md)** - ComfyUI integration patterns
+
+---
+
 ## Project Structure
 
 ```
-convert_to_quant.py              # Quantization implementation and experiments
-quant_ops.py                     # ComfyUI-compatible layout system
-kernels/                         # Triton GPU kernels
-  int8_kernels.py                # Default INT8 backend
-  int8_matmul.py                 # Experimental autotuned kernels
-float_utils/                     # Utility functions
-AGENTS.md                        # AI agent development guide
-ACTIVE.md                        # Current implementations & status
-PLANNED.md                       # Roadmap and planned features
-DEVELOPMENT.md                   # Research notes and findings
-MANUAL.md                        # User documentation
-quantization.examples.md         # ComfyUI integration examples
-ComfyUI_Custom_Nodes_Agent/      # Reference submodule (patterns)
-ComfyUI/                         # Reference submodule (source)
+convert_to_quant/
+├── convert_to_quant/            # Main package
+│   ├── convert_to_quant.py      # Core quantization implementation
+│   └── comfy/                   # ComfyUI-compatible components
+│       ├── quant_ops.py         # Layout system & QuantizedTensor
+│       ├── int8_kernels.py      # INT8 Triton kernels
+│       ├── nf4_kernels.py       # NF4/FP4 kernels
+│       └── float.py             # FP8 utilities
+├── pyproject.toml               # Package configuration
+├── MANUAL.md                    # User documentation
+└── ...
 ```
 
 ---
@@ -95,6 +136,53 @@ ComfyUI/                         # Reference submodule (source)
 - **Bias Correction**: Automatic bias adjustment using synthetic calibration data
 - **Model-Specific Support**: Exclusion lists for sensitive layers (norms, embeddings, distillation)
 - **Triton Kernels**: GPU-accelerated quantization/dequantization with fallback to PyTorch
+- **Three-Tier Quantization**: Mix different formats per layer using `--custom-layers` and `--fallback`
+- **Layer Config JSON**: Fine-grained per-layer control with regex pattern matching
+- **LR Schedules**: Adaptive, exponential, and plateau learning rate scheduling
+
+---
+
+## Advanced Usage
+
+### Layer Config JSON
+
+Define per-layer quantization settings with regex patterns:
+
+```bash
+# Generate a template from your model
+convert_to_quant -i model.safetensors --dry-run --layer-config-template layers.json
+
+# Apply custom layer config
+convert_to_quant -i model.safetensors --layer-config layers.json --comfy_quant
+```
+
+### Scaling Modes
+
+```bash
+# Tensor-wise scaling (default)
+convert_to_quant -i model.safetensors --scaling-mode tensor --comfy_quant
+
+# Block-wise scaling for better accuracy
+convert_to_quant -i model.safetensors --scaling-mode block --block_size 64 --comfy_quant
+```
+
+### Additional Help
+
+```bash
+# View experimental features
+convert_to_quant --help-experimental
+
+# View model-specific filter presets
+convert_to_quant --help-filters
+```
+
+## Requirements
+
+- Python 3.9+
+- PyTorch 2.1+ (with CUDA for GPU acceleration)
+- safetensors >= 0.4.2
+- tqdm
+- (Optional) triton >= 2.1.0 for INT8 kernels
 
 ---
 
@@ -107,4 +195,4 @@ ComfyUI/                         # Reference submodule (source)
 
 ## License
 
-[Add license information]
+MIT License
