@@ -1,5 +1,60 @@
 # Development Log
 
+## 2025-12-17: NF4/FP4/AF4 Learned Rounding Optimization
+
+### Session Summary
+Added SVD-based learned rounding optimization to 4-bit quantization formats with full LR schedule parity (adaptive/exponential/plateau).
+
+---
+
+### New Features
+
+| Feature | Description |
+|---------|-------------|
+| `--af4` | AF4 (AbnormalFloat4) codebook support, optimized for block_size=64 |
+| NF4/FP4/AF4 optimization | Absmax scale refinement via gradient descent |
+| Full LR schedules | `adaptive`, `exponential`, `plateau` with all parameters |
+
+### New CLI Argument
+
+```bash
+convert_to_quant -i model.safetensors --af4 --block_size 64 --comfy_quant
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `convert_to_quant/comfy/nf4_kernels.py` | Added `AF4_CODEBOOK`, `quantize_af4`, `dequantize_af4`, updated `_get_codebook()` |
+| `convert_to_quant/convert_to_quant.py` | Added `_convert_af4`, `_optimize_nf4_learned_rounding`, `_optimize_nf4_original`; updated `_convert_nf4`/`_convert_fp4` to call optimizer; added af4 to CLI, formats, and routing |
+
+### Optimization Strategy
+
+For 4-bit codebook quantization, we optimize **absmax scales** (not indices):
+1. Compute SVD of weight matrix → project error onto top-k components
+2. Iteratively adjust absmax to minimize projected reconstruction error
+3. Re-quantize with optimized absmax
+
+This differs from FP8/INT8 where quantized values are directly adjusted.
+
+### Usage
+
+```bash
+# NF4 with optimization (default)
+convert_to_quant -i model.safetensors --nf4 --block_size 64 --comfy_quant -n 100
+
+# FP4 with plateau schedule
+convert_to_quant -i model.safetensors --fp4 --block_size 64 --comfy_quant -n 200 --lr_schedule plateau
+
+# AF4 (AbnormalFloat4) - optimized codebook for block_size=64
+convert_to_quant -i model.safetensors --af4 --block_size 64 --comfy_quant
+
+# Simple quantization (no optimization)
+convert_to_quant -i model.safetensors --nf4 --block_size 64 --comfy_quant --simple
+```
+
+---
+
 ## 2025-12-16: Shape-Adaptive Plateau Schedule & Early Stopping Controls
 
 ### Session Summary
