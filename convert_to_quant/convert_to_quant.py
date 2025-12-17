@@ -51,6 +51,7 @@ T5XXL_REMOVE_KEY_NAMES = ["decoder", "lm_head"]
 QWEN_AVOID_KEY_NAMES = ["norm_added_k", "norm_added_q", "norm_k", "norm_q", "txt_norm"]
 HUNYUAN_AVOID_KEY_NAMES = ["layernorm", "img_attn_k_norm", "img_attn_q_norm", "txt_attn_k_norm", "txt_attn_q_norm", "norm1", "norm2", "vision_in.proj.0", "vision_in.proj.4", "img_in.proj", "cond_type_embedding"]
 ZIMAGE_AVOID_KEY_NAMES = ["cap_embedder.0", "cap_pad_token", "attention_norm1", "attention_norm2", "ffn_norm1", "ffn_norm2", "k_norm", "q_norm", "x_pad_token"]
+FLUX2_LAYER_KEYNAMES = ["stream_modulation", "guidance_in", "time_in", "final_layer", "img_in", "txt_in"]
 DISTILL_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
 DISTILL_LAYER_KEYNAMES_SMALL = ["distilled_guidance_layer"]
 NERF_LAYER_KEYNAMES_LARGE = ["distilled_guidance_layer", "nerf_blocks", "nerf_image_embedder", "txt_in"]
@@ -1587,7 +1588,7 @@ class LearnedRoundingConverter:
 # --- Main script execution functions ---
 
 def convert_to_fp8_scaled(
-    input_file: str, output_file: str, comfy_quant: bool, t5xxl: bool, mistral: bool, distillation_large: bool,
+    input_file: str, output_file: str, comfy_quant: bool, t5xxl: bool, mistral: bool, flux2: bool, distillation_large: bool,
     distillation_small: bool, nerf_large: bool, nerf_small: bool,
     radiance: bool, wan: bool, qwen: bool, hunyuan: bool, zimage: bool, zimage_refiner: bool, calib_samples: int, seed: int,
     int8: bool = False, nf4: bool = False, fp4: bool = False,
@@ -1793,10 +1794,12 @@ def convert_to_fp8_scaled(
                 exclusion_reason = "Z-Image exclusion"
             elif hunyuan and any(n in key for n in HUNYUAN_AVOID_KEY_NAMES):
                 exclusion_reason = "Hunyuan Video 1.5 exclusion"
+            elif flux2 and any(n in key for n in FLUX2_LAYER_KEYNAMES):
+                exclusion_reason = "Flux2 exclusion and keep in high precision"
             elif distillation_large and any(n in key for n in DISTILL_LAYER_KEYNAMES_LARGE):
-                exclusion_reason = "Distillation layer and Flux1 keep in high precision"
+                exclusion_reason = "Distillation layer and Chroma keep in high precision"
             elif distillation_small and any(n in key for n in DISTILL_LAYER_KEYNAMES_SMALL):
-                exclusion_reason = "Distillation layer keep in high precision"
+                exclusion_reason = "Distillation layer and Chroma keep in high precision"
             elif nerf_large and any(n in key for n in NERF_LAYER_KEYNAMES_LARGE):
                 exclusion_reason = "NeRF layer, distillation layer and txt_in keep in high precision"
             elif nerf_small and any(n in key for n in NERF_LAYER_KEYNAMES_SMALL):
@@ -2223,7 +2226,7 @@ EXPERIMENTAL_ARGS = {
 }
 
 FILTER_ARGS = {
-    't5xxl', 'mistral', 'distillation_large', 'distillation_small',
+    't5xxl', 'mistral', 'flux2', 'distillation_large', 'distillation_small',
     'nerf_large', 'nerf_small', 'radiance', 'wan', 'qwen',
     'hunyuan', 'zimage', 'zimage_refiner'
 }
@@ -2372,7 +2375,7 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
         print("Diffusion Models (Flux-style):")
         print("-" * 40)
 
-        diffusion_args = ['distillation_large', 'distillation_small', 'nerf_large', 'nerf_small', 'radiance']
+        diffusion_args = ['flux2', 'distillation_large', 'distillation_small', 'nerf_large', 'nerf_small', 'radiance']
         for action in self._all_actions:
             if self._get_dest_name(action) in diffusion_args:
                 line = self._format_action_help(action)
@@ -2522,6 +2525,7 @@ def main():
     parser.add_argument("--input_scale", action='store_true', help="Include input_scale tensor for FP8 (uses weight_scale as default). Always enabled for T5XXL.")
     parser.add_argument("--t5xxl", action='store_true', help="Apply exclusions for T5XXL Text Encoder models.")
     parser.add_argument("--mistral", action='store_true', help="Apply exclusions for Mistral Text Encoder models.")
+    parser.add_argument("--flux2", action='store_true', help="Apply exclusions for Flux2 models.")
     parser.add_argument("--distillation_large", action='store_true', help="Exclude known distillation layers and other sensitive.")
     parser.add_argument("--distillation_small", action='store_true', help="Exclude known distillation layers.")
     parser.add_argument("--nerf_large", action='store_true', help="Exclude known NeRF layers, distillation layers and txt_in.")
@@ -2693,7 +2697,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         else:
             format_str = TARGET_FP8_DTYPE.__str__().split('.')[-1]
             scaling_str = f"_{args.scaling_mode}"
-        flags = "".join(["_t5" if args.t5xxl else "", "_mistral" if args.mistral else "", "_nodist_l" if args.distillation_large else "", "_nodist_s" if args.distillation_small else "", "_nonerf_l" if args.nerf_large else "", "_nonerf_s" if args.nerf_small else "", "_norad" if args.radiance else ""])
+        flags = "".join(["_t5" if args.t5xxl else "", "_mistral" if args.mistral else "", "_flux2" if args.flux2 else "", "_nodist_l" if args.distillation_large else "", "_nodist_s" if args.distillation_small else "", "_nonerf_l" if args.nerf_large else "", "_nonerf_s" if args.nerf_small else "", "_norad" if args.radiance else ""])
         output_file = f"{base}_{format_str}{scaling_str}{flags}_k{args.min_k}-{args.max_k}_p{args.top_p}_lr{args.lr}.safetensors"
     else:
         output_file = args.output
@@ -2706,7 +2710,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
     print(f"Using seed: {seed}")
 
     # Separate converter kwargs from function kwargs
-    excluded_keys = ['input', 'output', 'comfy_quant', 't5xxl', 'mistral', 'distillation_large', 'distillation_small',
+    excluded_keys = ['input', 'output', 'comfy_quant', 't5xxl', 'mistral', 'flux2', 'distillation_large', 'distillation_small',
                      'nerf_large', 'nerf_small', 'radiance', 'wan', 'qwen', 'hunyuan', 'zimage', 'zimage_refiner',
                      'calib_samples', 'manual_seed', 'int8', 'nf4', 'fp4', 'fallback', 'custom_layers', 'custom_type',
                      'custom_block_size', 'custom_scaling_mode', 'custom_simple', 'custom_heur', 'fallback_block_size', 'fallback_simple',
@@ -2719,7 +2723,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         layer_config_data = load_layer_config(args.layer_config)
 
     convert_to_fp8_scaled(
-        args.input, output_file, args.comfy_quant, args.t5xxl, args.mistral, args.distillation_large,
+        args.input, output_file, args.comfy_quant, args.t5xxl, args.mistral, args.flux2, args.distillation_large,
         args.distillation_small, args.nerf_large, args.nerf_small,
         args.radiance, args.wan, args.qwen, args.hunyuan, args.zimage, args.zimage_refiner, args.calib_samples, seed,
         int8=args.int8, nf4=args.nf4, fp4=args.fp4,
