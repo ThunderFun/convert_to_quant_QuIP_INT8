@@ -346,6 +346,43 @@ def create_comfy_quant_tensor(format_type: str, block_size: Optional[int] = None
     return dict_to_tensor(comfy_quant)
 
 
+def fix_comfy_quant_params_structure(comfy_quant_tensor: torch.Tensor) -> Tuple[torch.Tensor, bool]:
+    """
+    Check and fix comfy_quant config with incorrect nested params structure.
+
+    Old buggy format: {"format": "...", "params": {"group_size": 128}}
+    Correct format:   {"format": "...", "group_size": 128}
+
+    Args:
+        comfy_quant_tensor: Existing .comfy_quant tensor from model
+
+    Returns:
+        Tuple of (fixed_tensor, was_fixed)
+        - fixed_tensor: Fixed tensor (or original if no fix needed)
+        - was_fixed: True if the structure was fixed
+    """
+    try:
+        config = tensor_to_dict(comfy_quant_tensor)
+    except Exception:
+        return comfy_quant_tensor, False
+
+    if "params" not in config:
+        return comfy_quant_tensor, False
+
+    # Fix nested params structure
+    params = config.pop("params")
+    if isinstance(params, dict):
+        # Move group_size to root level
+        if "group_size" in params:
+            config["group_size"] = params["group_size"]
+        # Move any other params to root (future-proofing)
+        for key, value in params.items():
+            if key != "group_size" and key not in config:
+                config[key] = value
+
+    return dict_to_tensor(config), True
+
+
 def should_skip_layer_for_performance(tensor: torch.Tensor, block_size: int) -> Tuple[bool, str]:
     """
     Check if a layer should be skipped based on performance heuristics.
@@ -2589,9 +2626,16 @@ def convert_fp8_scaled_to_comfy_quant(
             if scale_input is not None:
                 print(f"  Removing dummy scale_input from high-precision layer: {base_name}")
 
-    # Add other tensors (bias, norms, etc.)
+    # Add other tensors (bias, norms, etc.) - also fix any incorrect comfy_quant structures
+    fixed_comfy_quant_count = 0
     for key, tensor in other_tensors.items():
-        output_tensors[key] = tensor
+        if key.endswith('.comfy_quant'):
+            fixed_tensor, was_fixed = fix_comfy_quant_params_structure(tensor)
+            if was_fixed:
+                fixed_comfy_quant_count += 1
+            output_tensors[key] = fixed_tensor
+        else:
+            output_tensors[key] = tensor
 
     # Validate hp_filter if provided
     if hp_pattern:
@@ -2621,6 +2665,8 @@ def convert_fp8_scaled_to_comfy_quant(
     print(f"  High-precision layers: {len(hp_layers)}")
     print(f"  Other tensors:         {len(other_tensors)}")
     print(f"  Total output tensors:  {len(output_tensors)}")
+    if fixed_comfy_quant_count > 0:
+        print(f"  Fixed comfy_quant:     {fixed_comfy_quant_count} (nested params → flat)")
     print("-" * 60)
 
     # Save output
@@ -2660,7 +2706,8 @@ def convert_int8_to_comfy_quant(
     print(f"Kernel backend: {kernel_backend}")
     print("-" * 60)
 
-    # Determine INT8 format type
+    # Determine INT8 format type - only use CLI if explicitly specified (non-default)
+    cli_format_explicit = kernel_backend != "blockwise"  # User explicitly chose a format
     int8_format = "int8_lodewise" if kernel_backend == "lodewise" else "int8_blockwise"
 
     # Load input tensors
@@ -2759,9 +2806,12 @@ def convert_int8_to_comfy_quant(
                 M, K = weight.shape[0], weight.shape[1] if weight.ndim >= 2 else 1
 
                 if weight_scale is None:
-                    detected_format = int8_format
+                    detected_format = int8_format if cli_format_explicit else "int8_blockwise"
                     detected_block_size = block_size
-                    print(f"    → Format: {detected_format} (no scale, using CLI default)")
+                    if cli_format_explicit:
+                        print(f"    → Format: {detected_format} (no scale, using CLI-specified format)")
+                    else:
+                        print(f"    → Format: {detected_format} (no scale, assumed blockwise)")
                 elif weight_scale.ndim == 2:
                     scale_dim0, scale_dim1 = weight_scale.shape
                     # Check if it's lodewise: (N, K//bs) where N == M (output features)
@@ -2777,13 +2827,19 @@ def convert_int8_to_comfy_quant(
                         detected_block_size = bs_M if bs_M == bs_K else min(bs_M, bs_K)
                         print(f"    → Format: {detected_format} (scale shape={weight_scale.shape}, bs={detected_block_size})")
                     else:
-                        detected_format = int8_format
+                        detected_format = int8_format if cli_format_explicit else "int8_blockwise"
                         detected_block_size = block_size
-                        print(f"    → Format: {detected_format} (scale 2D, cannot identify layout)")
+                        if cli_format_explicit:
+                            print(f"    → Format: {detected_format} (scale 2D, cannot identify - using CLI-specified)")
+                        else:
+                            print(f"    → Format: {detected_format} (scale 2D, cannot identify layout)")
                 else:
-                    detected_format = int8_format
+                    detected_format = int8_format if cli_format_explicit else "int8_blockwise"
                     detected_block_size = block_size
-                    print(f"    → Format: {detected_format} (scale ndim={weight_scale.ndim}, using CLI default)")
+                    if cli_format_explicit:
+                        print(f"    → Format: {detected_format} (scale ndim={weight_scale.ndim}, using CLI-specified)")
+                    else:
+                        print(f"    → Format: {detected_format} (scale ndim={weight_scale.ndim}, assumed blockwise)")
 
                 # Check if .comfy_quant already exists in other_tensors
                 if f"{base_name}.comfy_quant" not in other_tensors:
@@ -2815,9 +2871,12 @@ def convert_int8_to_comfy_quant(
                 M, K = weight.shape[0], weight.shape[1] if weight.ndim >= 2 else 1
 
                 if scale_weight is None:
-                    detected_format = int8_format
+                    detected_format = int8_format if cli_format_explicit else "int8_blockwise"
                     detected_block_size = block_size
-                    print(f"    → Format: {detected_format} (no scale, using CLI default)")
+                    if cli_format_explicit:
+                        print(f"    → Format: {detected_format} (no scale, using CLI-specified format)")
+                    else:
+                        print(f"    → Format: {detected_format} (no scale, assumed blockwise)")
                 elif scale_weight.ndim == 2:
                     scale_dim0, scale_dim1 = scale_weight.shape
                     # Check if it's lodewise: (N, K//bs) where N == M (output features)
@@ -2833,13 +2892,19 @@ def convert_int8_to_comfy_quant(
                         detected_block_size = bs_M if bs_M == bs_K else min(bs_M, bs_K)
                         print(f"    → Format: {detected_format} (scale shape={scale_weight.shape}, bs={detected_block_size})")
                     else:
-                        detected_format = int8_format
+                        detected_format = int8_format if cli_format_explicit else "int8_blockwise"
                         detected_block_size = block_size
-                        print(f"    → Format: {detected_format} (scale 2D, cannot identify layout)")
+                        if cli_format_explicit:
+                            print(f"    → Format: {detected_format} (scale 2D, cannot identify - using CLI-specified)")
+                        else:
+                            print(f"    → Format: {detected_format} (scale 2D, cannot identify layout)")
                 else:
-                    detected_format = int8_format
+                    detected_format = int8_format if cli_format_explicit else "int8_blockwise"
                     detected_block_size = block_size
-                    print(f"    → Format: {detected_format} (scale ndim={scale_weight.ndim}, using CLI default)")
+                    if cli_format_explicit:
+                        print(f"    → Format: {detected_format} (scale ndim={scale_weight.ndim}, using CLI-specified)")
+                    else:
+                        print(f"    → Format: {detected_format} (scale ndim={scale_weight.ndim}, assumed blockwise)")
 
                 # Create .comfy_quant metadata
                 detected_formats[detected_format] = detected_formats.get(detected_format, 0) + 1
@@ -2860,9 +2925,16 @@ def convert_int8_to_comfy_quant(
             if scale_input is not None:
                 print(f"  Removing dummy scale_input from high-precision layer: {base_name}")
 
-    # Add other tensors (bias, norms, etc.)
+    # Add other tensors (bias, norms, etc.) - also fix any incorrect comfy_quant structures
+    fixed_comfy_quant_count = 0
     for key, tensor in other_tensors.items():
-        output_tensors[key] = tensor
+        if key.endswith('.comfy_quant'):
+            fixed_tensor, was_fixed = fix_comfy_quant_params_structure(tensor)
+            if was_fixed:
+                fixed_comfy_quant_count += 1
+            output_tensors[key] = fixed_tensor
+        else:
+            output_tensors[key] = tensor
 
     # Summary
     print("\n" + "-" * 60)
@@ -2880,6 +2952,8 @@ def convert_int8_to_comfy_quant(
     else:
         print(f"  INT8 format (CLI):     {int8_format}")
         print(f"  Block size (CLI):      {block_size}")
+    if fixed_comfy_quant_count > 0:
+        print(f"  Fixed comfy_quant:     {fixed_comfy_quant_count} (nested params → flat)")
     print("-" * 60)
 
     # Save output
