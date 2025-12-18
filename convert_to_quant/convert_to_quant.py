@@ -2276,10 +2276,13 @@ def convert_to_fp8_scaled(
                 # 4-bit formats use absmax instead of weight_scale
                 new_tensors[f"{base_name}.absmax"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 comfy_quant_tensor = create_comfy_quant_tensor(
-                    "bnb_nf4" if layer_format == 'nf4' else "bnb_fp4",
+                    "bnb_nf4" if layer_format == 'nf4' else ("bnb_af4" if layer_format == 'af4' else "bnb_fp4"),
                     block_size=layer_block_size,
                     full_precision_matrix_mult=layer_full_precision_mm if layer_full_precision_mm else None
                 )
+                # Add input_scale for 4-bit if requested
+                if include_input_scale:
+                    new_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32, device='cpu')
             elif is_int8:
                 new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
                 # Use int8_blockwise or int8_lodewise based on kernel_backend
@@ -2289,8 +2292,9 @@ def convert_to_fp8_scaled(
                     block_size=layer_block_size,
                     full_precision_matrix_mult=layer_full_precision_mm if layer_full_precision_mm else None
                 )
-                # Add input_scale placeholder for INT8 (required by ComfyUI)
-                new_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=SCALE_DTYPE, device='cpu')
+                # Add input_scale for INT8 if requested
+                if include_input_scale:
+                    new_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32, device='cpu')
             else:
                 # FP8 format - determine format based on scaling_mode or layer_config
                 new_tensors[f"{base_name}.weight_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
@@ -2316,9 +2320,12 @@ def convert_to_fp8_scaled(
                     block_size=fp8_block_size,
                     full_precision_matrix_mult=layer_full_precision_mm if layer_full_precision_mm else None
                 )
-                # Optionally add input_scale for FP8 (uses weight_scale as reasonable default)
-                if include_input_scale:
-                    new_tensors[f"{base_name}.input_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
+                # Add input_scale for FP8: use weight_scale for t5xxl/mistral, 1.0 otherwise
+                if include_input_scale or t5xxl or mistral:
+                    if t5xxl or mistral:
+                        new_tensors[f"{base_name}.input_scale"] = dequant_s.to(device='cpu', dtype=SCALE_DTYPE).detach().clone()
+                    else:
+                        new_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32, device='cpu')
             new_tensors[f"{base_name}.comfy_quant"] = comfy_quant_tensor.to(device='cpu')
 
         else:
@@ -2409,6 +2416,7 @@ def convert_fp8_scaled_to_comfy_quant(
     output_file: str,
     hp_filter: Optional[str] = None,
     full_precision_mm: bool = False,
+    include_input_scale: bool = False,
 ):
     """
     Convert legacy fp8_scaled format to comfy_quant format.
@@ -2422,6 +2430,7 @@ def convert_fp8_scaled_to_comfy_quant(
         output_file: Path to output comfy_quant safetensors file
         hp_filter: Optional regex pattern to validate high-precision layers
         full_precision_mm: If True, set full_precision_matrix_mult in .comfy_quant
+        include_input_scale: If True, add input_scale tensor (1.0 fp32) when missing
     """
     print(f"Converting fp8_scaled to comfy_quant format")
     print(f"Input: {input_file}")
@@ -2517,12 +2526,17 @@ def convert_fp8_scaled_to_comfy_quant(
             else:
                 print(f"  WARNING: FP8 layer {base_name} missing scale_weight")
 
-            # Handle scale_input -> input_scale (skip if value is 1.0)
+            # Handle scale_input -> input_scale
             if scale_input is not None:
                 if scale_input.numel() == 1 and abs(scale_input.item() - 1.0) < 1e-6:
-                    pass  # Skip dummy input_scale
+                    # Dummy input_scale (1.0) - only include if explicitly requested
+                    if include_input_scale:
+                        output_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32)
                 else:
                     output_tensors[f"{base_name}.input_scale"] = scale_input
+            elif include_input_scale:
+                # No scale_input but flag is set - add default input_scale
+                output_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32)
 
             # Detect format and block_size from scale_weight tensor shape
             # Scale shape conventions from quant_ops.py layouts:
@@ -2685,6 +2699,7 @@ def convert_int8_to_comfy_quant(
     output_file: str,
     block_size: int = 128,
     kernel_backend: str = "blockwise",
+    include_input_scale: bool = False,
 ):
     """
     Convert legacy INT8 quantized models to comfy_quant format.
@@ -2698,6 +2713,7 @@ def convert_int8_to_comfy_quant(
         output_file: Path to output comfy_quant safetensors file
         block_size: Block size to use in comfy_quant metadata (default 128)
         kernel_backend: "blockwise" or "lodewise" for INT8 format type
+        include_input_scale: If True, add input_scale tensor (1.0 fp32) when missing
     """
     print(f"Converting INT8 legacy format to comfy_quant format")
     print(f"Input: {input_file}")
@@ -2799,6 +2815,9 @@ def convert_int8_to_comfy_quant(
                 output_tensors[f"{base_name}.weight_scale"] = weight_scale
                 if input_scale is not None:
                     output_tensors[f"{base_name}.input_scale"] = input_scale
+                elif include_input_scale:
+                    # No input_scale but flag is set - add default (fp32, 1.0)
+                    output_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32)
                 # Detect INT8 format and block_size from weight_scale shape
                 # Scale shape conventions from quant_ops.py layouts:
                 # - BlockWiseINT8Layout: (M//bs, N//bs) - 2D block grid
@@ -2860,9 +2879,9 @@ def convert_int8_to_comfy_quant(
                 # Handle scale_input -> input_scale
                 if scale_input is not None:
                     output_tensors[f"{base_name}.input_scale"] = scale_input
-                else:
-                    # Add default input_scale (required by ComfyUI)
-                    output_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=SCALE_DTYPE)
+                elif include_input_scale:
+                    # No scale_input but flag is set - add default input_scale (fp32, 1.0)
+                    output_tensors[f"{base_name}.input_scale"] = torch.tensor([1.0], dtype=torch.float32)
 
                 # Detect INT8 format and block_size from scale_weight shape
                 # Scale shape conventions from quant_ops.py layouts:
@@ -3276,7 +3295,7 @@ def main():
     parser.add_argument("--simple", action='store_true', help="Skip SVD optimization, use simple quantization.")
     parser.add_argument("--full_precision_matrix_mult", action='store_true', help="Add full_precision_matrix_mult=True to .comfy_quant metadata.")
     parser.add_argument("--heur", action='store_true', help="Skip layers with poor quantization characteristics (aspect ratio, size).")
-    parser.add_argument("--input_scale", action='store_true', help="Include input_scale tensor for FP8 (uses weight_scale as default). Always enabled for T5XXL.")
+    parser.add_argument("--input_scale", action='store_true', help="Include input_scale tensor (fp32, 1.0) for quantized layers. Works with --convert-fp8-scaled and --convert-int8-scaled. Always enabled for T5XXL.")
     parser.add_argument("--t5xxl", action='store_true', help="Apply exclusions for T5XXL Text Encoder models.")
     parser.add_argument("--mistral", action='store_true', help="Apply exclusions for Mistral Text Encoder models.")
     parser.add_argument("--flux2", action='store_true', help="Apply exclusions for Flux2 models.")
@@ -3389,7 +3408,8 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             args.input,
             args.output,
             hp_filter=args.hp_filter,
-            full_precision_mm=args.full_precision_mm
+            full_precision_mm=args.full_precision_mm,
+            include_input_scale=args.input_scale
         )
         return
 
@@ -3415,7 +3435,8 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             args.input,
             args.output,
             block_size=int8_block_size,
-            kernel_backend=int8_kernel_backend
+            kernel_backend=int8_kernel_backend,
+            include_input_scale=args.input_scale
         )
         return
 
