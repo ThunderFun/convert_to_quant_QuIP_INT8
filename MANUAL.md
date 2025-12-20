@@ -32,7 +32,7 @@ This script converts neural network weights from full precision (FP16/FP32/BF16)
 ### Key Features
 
 - **Learned rounding optimization**: Uses SVD-based optimization to minimize quantization error
-- **Multiple optimizer choices**: Original, AdamW, RAdam, ProdigyPlusScheduleFree
+- **Multiple optimizer choices**: Original, AdamW, RAdam
 - **Bias correction**: Automatically adjusts biases to compensate for quantization error
 - **Model-specific filters**: Keep sensitive layers in high precision for various architectures
 - **ComfyUI compatible**: Generates `.comfy_quant` metadata for seamless integration
@@ -44,7 +44,7 @@ This script converts neural network weights from full precision (FP16/FP32/BF16)
 Install dependencies:
 
 ```bash
-pip install torch safetensors tqdm prodigy-plus-schedule-free
+pip install torch safetensors tqdm
 ```
 
 For FP8 support, you need:
@@ -152,7 +152,7 @@ These flags keep certain layers in high precision (not quantized):
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--optimizer` | `original` | Optimization algorithm: `original`, `adamw`, `radam`, `ppsf` |
+| `--optimizer` | `original` | Optimization algorithm: `original`, `adamw`, `radam` |
 | `--num_iter` | `500` | Maximum optimization iterations per tensor |
 | `--lr` | `0.01` | Learning rate for optimizers |
 | `--top_p` | `0.01` | Proportion of SVD principal components to use |
@@ -272,7 +272,6 @@ python convert_to_quant.py \
     -i wan_model.safetensors \
     --comfy_quant \
     --wan \
-    --optimizer ppsf \
     --num_iter 500
 ```
 
@@ -323,7 +322,6 @@ This preserves the most important weight matrix structure while allowing roundin
 | `original` | Medium | Best | Custom adaptive LR, no autograd overhead |
 | `adamw` | Fast | Good | Standard PyTorch AdamW |
 | `radam` | Fast | Good | Rectified Adam, good for varying LR |
-| `ppsf` | Slow | Very Good | Schedule-free, good for difficult cases |
 
 ### FP8 vs INT8
 
@@ -613,7 +611,7 @@ The loss plateaus or doesn't decrease.
 
 **Solutions:**
 
-- Try a different optimizer: `--optimizer adamw` or `--optimizer ppsf`
+- Try a different optimizer: `--optimizer adamw`
 - Increase iterations: `--num_iter 1000`
 - Adjust learning rate: `--lr 0.001` or `--lr 0.1`
 

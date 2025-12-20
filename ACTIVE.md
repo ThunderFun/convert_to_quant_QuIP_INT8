@@ -10,7 +10,7 @@ This document tracks current work in progress and actively maintained implementa
 - **SVD-based learned rounding optimization** - Core algorithm for minimizing quantization error
   - File: [convert_to_quant.py](convert_to_quant.py)
   - Status: ✅ Stable, actively improved
-  - Optimizers: original, adamw, radam, ppsf
+  - Optimizers: original, adamw, radam
 
 - **FP8 Quantization** - Floating-point 8-bit quantization
   - File: [quant_ops.py](quant_ops.py) - `TensorCoreFP8Layout` class
@@ -103,7 +103,7 @@ This document tracks current work in progress and actively maintained implementa
 - **Format selection**: `--int8` (default FP8)
 - **Scaling modes**: `--scaling_mode tensor` / `block`
 - **Block size**: `--block_size` (default 64)
-- **Optimization**: `--optimizer original|adamw|radam|ppsf`, `--num_iter`, `--lr`
+- **Optimization**: `--optimizer original|adamw|radam`, `--num_iter`, `--lr`
 - **SVD control**: `--top_p`, `--min_k`, `--max_k`, `--full_matrix`
 
 ### Model-Specific Flags
@@ -154,7 +154,7 @@ This document tracks current work in progress and actively maintained implementa
 ### Quality
 - **Typical MSE**: Minimal (<1% error)
 - **Visual quality**: Imperceptible for most models
-- **Sensitive models**: May need higher `--num_iter` or `--optimizer ppsf`
+- **Sensitive models**: May need higher `--num_iter`
 
 ---
 
@@ -172,7 +172,7 @@ This document tracks current work in progress and actively maintained implementa
 
 ### Optimization Convergence
 - **Issue**: Some tensors optimize slowly
-- **Workaround**: Try different optimizer (`--optimizer ppsf`) or increase iterations
+- **Workaround**: Try different optimizer or increase iterations
 - **Status**: Multiple optimizers available
 
 ---
@@ -181,7 +181,7 @@ This document tracks current work in progress and actively maintained implementa
 
 ### Latest Enhancements
 - ✨ INT8 block-wise quantization with Triton kernels
-- ✨ Multiple optimizer support (original, adamw, radam, ppsf)
+- ✨ Multiple optimizer support (original, adamw, radam)
 - ✨ Bias correction with synthetic calibration data
 - ✨ Layout-based operation dispatch system
 - ✨ Comprehensive model-specific exclusion lists

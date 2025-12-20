@@ -137,7 +137,7 @@ convert_to_quant/
 ## Key Features
 
 - **Learned Rounding**: SVD-based optimization minimizes quantization error in weight's principal directions
-- **Multiple Optimizers**: Original (adaptive LR), AdamW, RAdam, ProdigyPlusScheduleFree
+- **Multiple Optimizers**: Original (adaptive LR), AdamW, RAdam
 - **Bias Correction**: Automatic bias adjustment using synthetic calibration data
 - **Model-Specific Support**: Exclusion lists for sensitive layers (norms, embeddings, distillation)
 - **Triton Kernels**: GPU-accelerated quantization/dequantization with fallback to PyTorch

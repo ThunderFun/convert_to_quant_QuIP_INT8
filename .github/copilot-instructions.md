@@ -48,7 +48,6 @@ The gradient derivation for INT8 is **critical**: `∂L/∂Q = ∂L/∂dq * scal
 Controlled via `--optimizer` flag:
 - **`original`**: Custom adaptive learning rate, fastest convergence, no autograd overhead
 - **`adamw`/`radam`**: PyTorch optimizers, good for general cases
-- **`ppsf`**: ProdigyPlusScheduleFree, best for difficult tensors (slowest)
 
 Use `--simple` to skip learned rounding entirely (simple round-to-nearest).
 
