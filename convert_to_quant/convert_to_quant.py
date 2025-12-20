@@ -3414,14 +3414,7 @@ def convert_fp8_scaled_to_comfy_quant(
 
             # Handle scale_input -> input_scale
             if scale_input is not None:
-                if scale_input.numel() == 1 and abs(scale_input.item() - 1.0) < 1e-6:
-                    # Dummy input_scale (1.0) - only include if explicitly requested
-                    if include_input_scale:
-                        output_tensors[f"{base_name}.input_scale"] = torch.tensor(
-                            [1.0], dtype=torch.float32
-                        )
-                else:
-                    output_tensors[f"{base_name}.input_scale"] = scale_input
+                output_tensors[f"{base_name}.input_scale"] = scale_input
             elif include_input_scale:
                 # No scale_input but flag is set - add default input_scale
                 output_tensors[f"{base_name}.input_scale"] = torch.tensor(
