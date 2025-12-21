@@ -13,20 +13,7 @@ import gc
 import math
 import json
 from torch.optim import AdamW, RAdam
-from .comfy.quant_ops import BlockWiseINT8Layout, BlockWiseINT8LayoutLodeWise
-
-
-# Lode-Wise INT8 kernels (alternative INT8 quantization backend with per-output-lane scale access)
-try:
-    from .comfy.int8_kernels import (
-        weight_quant as lodewise_weight_quant,
-        weight_dequant as lodewise_weight_dequant,
-        int8_gemm_lodewise,
-    )
-
-    _HAS_LODEWISE = True
-except ImportError:
-    _HAS_LODEWISE = False
+from .comfy.quant_ops import BlockWiseINT8Layout
 
 # --- Constants and Configuration ---
 torch.set_printoptions(precision=8)
@@ -185,7 +172,6 @@ VALID_QUANT_FORMATS = {
     "float8_e4m3fn_blockwise",
     "float8_e4m3fn_block3d",
     "int8_blockwise",
-    "int8_lodewise",
 }
 
 
@@ -439,7 +425,7 @@ def create_comfy_quant_tensor(
 
     Args:
         format_type: One of "float8_e4m3fn", "float8_e4m3fn_rowwise", "float8_e4m3fn_blockwise",
-                     "int8_blockwise", or "int8_lodewise"
+                     or "int8_blockwise"
         block_size: Block/group size for quantization (for block-based formats)
         full_precision_matrix_mult: If True, adds "full_precision_matrix_mult": True.
                                     If False or None, this key is omitted.
@@ -449,7 +435,6 @@ def create_comfy_quant_tensor(
     """
     BLOCK_BASED_FORMATS = (
         "int8_blockwise",
-        "int8_lodewise",
         "float8_e4m3fn_blockwise",
     )
 
@@ -764,7 +749,6 @@ class LearnedRoundingConverter:
         full_matrix=False,
         target_format="fp8",
         no_learned_rounding=False,
-        kernel_backend="triton",
         lr_schedule="adaptive",
         lr_gamma=0.99,
         lr_patience=50,
@@ -790,7 +774,6 @@ class LearnedRoundingConverter:
         self.full_matrix = full_matrix
         self.target_format = target_format
         self.no_learned_rounding = no_learned_rounding
-        self.kernel_backend = kernel_backend
         self.optimizer_kwargs = kwargs
 
         # LR schedule configuration (for 'original' optimizer)
@@ -841,8 +824,6 @@ class LearnedRoundingConverter:
         print(f"  - Scaling mode: {self.scaling_mode}")
         if self.scaling_mode in ("block", "block2d"):
             print(f"    - Block size: {self.block_size}")
-        if self.target_format == "int8":
-            print(f"  - Kernel backend: {self.kernel_backend}")
 
     def _optimize_adamw(
         self,
@@ -1235,18 +1216,11 @@ class LearnedRoundingConverter:
             )
 
         # Select quantization backend
-        if self.kernel_backend == "lodewise":
-            # Use BlockWiseINT8LayoutLodeWise for per-row scale format (N, K//block_size)
-            qdata, layout_params = BlockWiseINT8LayoutLodeWise.quantize(
-                W_float32, block_size=self.block_size, is_weight=True
-            )
-            scale = layout_params["scale"]  # Shape: (N, K//block_size)
-        else:
-            # Use BlockWiseINT8Layout (default 'blockwise' backend from quant_ops.py)
-            qdata, layout_params = BlockWiseINT8Layout.quantize(
-                W_float32, block_size=self.block_size, is_weight=True
-            )
-            scale = layout_params["scale"]  # Shape: (M//block_size, N//block_size)
+        # Use BlockWiseINT8Layout (blockwise backend from quant_ops.py)
+        qdata, layout_params = BlockWiseINT8Layout.quantize(
+            W_float32, block_size=self.block_size, is_weight=True
+        )
+        scale = layout_params["scale"]  # Shape: (M//block_size, N//block_size)
 
         # Optional: Apply learned rounding optimization for INT8
         if not self.no_learned_rounding and self.num_iter > 0:
@@ -1254,14 +1228,9 @@ class LearnedRoundingConverter:
             qdata, scale = self._optimize_int8_learned_rounding(W_float32, qdata, scale)
 
         # Dequantize to get the reconstructed weight for bias correction
-        if self.kernel_backend == "lodewise":
-            dequantized_weight = BlockWiseINT8LayoutLodeWise.dequantize(
-                qdata, scale, self.block_size, is_weight=True, orig_dtype=COMPUTE_DTYPE
-            )
-        else:
-            dequantized_weight = BlockWiseINT8Layout.dequantize(
-                qdata, scale, self.block_size, is_weight=True, orig_dtype=COMPUTE_DTYPE
-            )
+        dequantized_weight = BlockWiseINT8Layout.dequantize(
+            qdata, scale, self.block_size, is_weight=True, orig_dtype=COMPUTE_DTYPE
+        )
 
         # Clean up
         del W_float32
@@ -2146,8 +2115,7 @@ def convert_to_fp8_scaled(
     converter_kwargs["target_format"] = target_format
     converter_kwargs["no_learned_rounding"] = no_learned_rounding
 
-    # Extract kernel_backend for comfy_quant format (default to 'blockwise')
-    kernel_backend = converter_kwargs.get("kernel_backend", "blockwise")
+    # Extract block_size for comfy_quant format
     block_size = converter_kwargs.get("block_size", 64)
 
     # Helper function to create converter for a specific format type
@@ -2451,14 +2419,9 @@ def convert_to_fp8_scaled(
                 new_tensors[f"{base_name}.weight_scale"] = (
                     dequant_s.to(device="cpu", dtype=SCALE_DTYPE).detach().clone()
                 )
-                # Use int8_blockwise or int8_lodewise based on kernel_backend
-                int8_format = (
-                    "int8_lodewise"
-                    if kernel_backend == "lodewise"
-                    else "int8_blockwise"
-                )
+                # Use int8_blockwise format
                 comfy_quant_tensor = create_comfy_quant_tensor(
-                    int8_format,
+                    "int8_blockwise",
                     block_size=layer_block_size,
                     full_precision_matrix_mult=layer_full_precision_mm
                     if layer_full_precision_mm
@@ -3094,7 +3057,6 @@ def convert_int8_to_comfy_quant(
     input_file: str,
     output_file: str,
     block_size: int = 128,
-    kernel_backend: str = "blockwise",
     include_input_scale: bool = False,
 ):
     """
@@ -3108,21 +3070,12 @@ def convert_int8_to_comfy_quant(
         input_file: Path to input INT8 safetensors file
         output_file: Path to output comfy_quant safetensors file
         block_size: Block size to use in comfy_quant metadata (default 128)
-        kernel_backend: "blockwise" or "lodewise" for INT8 format type
         include_input_scale: If True, add input_scale tensor (1.0 fp32) when missing
     """
-    print("Converting INT8 legacy format to comfy_quant format")
-    print(f"Input: {input_file}")
-    print(f"Output: {output_file}")
-    print(f"Block size: {block_size}")
-    print(f"Kernel backend: {kernel_backend}")
+    print(f"Converting INT8 model to comfy_quant format: {input_file}")
     print("-" * 60)
-
-    # Determine INT8 format type - only use CLI if explicitly specified (non-default)
-    cli_format_explicit = (
-        kernel_backend != "blockwise"
-    )  # User explicitly chose a format
-    int8_format = "int8_lodewise" if kernel_backend == "lodewise" else "int8_blockwise"
+    print(f"Block size: {block_size}")
+    print("-" * 60)
 
     # Load input tensors
     tensors: Dict[str, torch.Tensor] = {}
@@ -3221,66 +3174,34 @@ def convert_int8_to_comfy_quant(
                 # Detect INT8 format and block_size from weight_scale shape
                 # Scale shape conventions from quant_ops.py layouts:
                 # - BlockWiseINT8Layout: (M//bs, N//bs) - 2D block grid
-                # - BlockWiseINT8LayoutLodeWise: (N, K//bs) - per-output-row blocking
                 M, K = weight.shape[0], weight.shape[1] if weight.ndim >= 2 else 1
 
+                detected_format = "int8_blockwise"
                 if weight_scale is None:
-                    detected_format = (
-                        int8_format if cli_format_explicit else "int8_blockwise"
-                    )
                     detected_block_size = block_size
-                    if cli_format_explicit:
-                        print(
-                            f"    → Format: {detected_format} (no scale, using CLI-specified format)"
-                        )
-                    else:
-                        print(
-                            f"    → Format: {detected_format} (no scale, assumed blockwise)"
-                        )
+                    print(
+                        f"    → Format: {detected_format} (no scale, assumed blockwise)"
+                    )
                 elif weight_scale.ndim == 2:
                     scale_dim0, scale_dim1 = weight_scale.shape
-                    # Check if it's lodewise: (N, K//bs) where N == M (output features)
-                    if scale_dim0 == M and K % scale_dim1 == 0:
-                        detected_format = "int8_lodewise"
-                        detected_block_size = K // scale_dim1
-                        print(
-                            f"    → Format: {detected_format} (scale shape={weight_scale.shape}, bs={detected_block_size})"
-                        )
                     # Check if it's blockwise: (M//bs, N//bs)
-                    elif M % scale_dim0 == 0 and K % scale_dim1 == 0:
+                    if M % scale_dim0 == 0 and K % scale_dim1 == 0:
                         bs_M = M // scale_dim0
                         bs_K = K // scale_dim1
-                        detected_format = "int8_blockwise"
                         detected_block_size = bs_M if bs_M == bs_K else min(bs_M, bs_K)
                         print(
                             f"    → Format: {detected_format} (scale shape={weight_scale.shape}, bs={detected_block_size})"
                         )
                     else:
-                        detected_format = (
-                            int8_format if cli_format_explicit else "int8_blockwise"
-                        )
                         detected_block_size = block_size
-                        if cli_format_explicit:
-                            print(
-                                f"    → Format: {detected_format} (scale 2D, cannot identify - using CLI-specified)"
-                            )
-                        else:
-                            print(
-                                f"    → Format: {detected_format} (scale 2D, cannot identify layout)"
-                            )
+                        print(
+                            f"    → Format: {detected_format} (scale 2D, cannot identify layout)"
+                        )
                 else:
-                    detected_format = (
-                        int8_format if cli_format_explicit else "int8_blockwise"
-                    )
                     detected_block_size = block_size
-                    if cli_format_explicit:
-                        print(
-                            f"    → Format: {detected_format} (scale ndim={weight_scale.ndim}, using CLI-specified)"
-                        )
-                    else:
-                        print(
-                            f"    → Format: {detected_format} (scale ndim={weight_scale.ndim}, assumed blockwise)"
-                        )
+                    print(
+                        f"    → Format: {detected_format} (scale ndim={weight_scale.ndim}, assumed blockwise)"
+                    )
 
                 # Check if .comfy_quant already exists in other_tensors
                 if f"{base_name}.comfy_quant" not in other_tensors:
@@ -3312,66 +3233,34 @@ def convert_int8_to_comfy_quant(
                 # Detect INT8 format and block_size from scale_weight shape
                 # Scale shape conventions from quant_ops.py layouts:
                 # - BlockWiseINT8Layout: (M//bs, N//bs) - 2D block grid
-                # - BlockWiseINT8LayoutLodeWise: (N, K//bs) - per-output-row blocking
                 M, K = weight.shape[0], weight.shape[1] if weight.ndim >= 2 else 1
 
+                detected_format = "int8_blockwise"
                 if scale_weight is None:
-                    detected_format = (
-                        int8_format if cli_format_explicit else "int8_blockwise"
-                    )
                     detected_block_size = block_size
-                    if cli_format_explicit:
-                        print(
-                            f"    → Format: {detected_format} (no scale, using CLI-specified format)"
-                        )
-                    else:
-                        print(
-                            f"    → Format: {detected_format} (no scale, assumed blockwise)"
-                        )
+                    print(
+                        f"    → Format: {detected_format} (no scale, assumed blockwise)"
+                    )
                 elif scale_weight.ndim == 2:
                     scale_dim0, scale_dim1 = scale_weight.shape
-                    # Check if it's lodewise: (N, K//bs) where N == M (output features)
-                    if scale_dim0 == M and K % scale_dim1 == 0:
-                        detected_format = "int8_lodewise"
-                        detected_block_size = K // scale_dim1
-                        print(
-                            f"    → Format: {detected_format} (scale shape={scale_weight.shape}, bs={detected_block_size})"
-                        )
                     # Check if it's blockwise: (M//bs, N//bs)
-                    elif M % scale_dim0 == 0 and K % scale_dim1 == 0:
+                    if M % scale_dim0 == 0 and K % scale_dim1 == 0:
                         bs_M = M // scale_dim0
                         bs_K = K // scale_dim1
-                        detected_format = "int8_blockwise"
                         detected_block_size = bs_M if bs_M == bs_K else min(bs_M, bs_K)
                         print(
                             f"    → Format: {detected_format} (scale shape={scale_weight.shape}, bs={detected_block_size})"
                         )
                     else:
-                        detected_format = (
-                            int8_format if cli_format_explicit else "int8_blockwise"
-                        )
                         detected_block_size = block_size
-                        if cli_format_explicit:
-                            print(
-                                f"    → Format: {detected_format} (scale 2D, cannot identify - using CLI-specified)"
-                            )
-                        else:
-                            print(
-                                f"    → Format: {detected_format} (scale 2D, cannot identify layout)"
-                            )
+                        print(
+                            f"    → Format: {detected_format} (scale 2D, cannot identify layout)"
+                        )
                 else:
-                    detected_format = (
-                        int8_format if cli_format_explicit else "int8_blockwise"
-                    )
                     detected_block_size = block_size
-                    if cli_format_explicit:
-                        print(
-                            f"    → Format: {detected_format} (scale ndim={scale_weight.ndim}, using CLI-specified)"
-                        )
-                    else:
-                        print(
-                            f"    → Format: {detected_format} (scale ndim={scale_weight.ndim}, assumed blockwise)"
-                        )
+                    print(
+                        f"    → Format: {detected_format} (scale ndim={scale_weight.ndim}, assumed blockwise)"
+                    )
 
                 # Create .comfy_quant metadata
                 detected_formats[detected_format] = (
@@ -3423,8 +3312,8 @@ def convert_int8_to_comfy_quant(
         for fmt, count in sorted(detected_formats.items(), key=lambda x: -x[1]):
             print(f"    {fmt}: {count} layers")
     else:
-        print(f"  INT8 format (CLI):     {int8_format}")
-        print(f"  Block size (CLI):      {block_size}")
+        print(f"  INT8 format (CLI):     {detected_format}")
+        print(f"  Block size (CLI):      {detected_block_size}")
     if fixed_comfy_quant_count > 0:
         print(
             f"  Fixed comfy_quant:     {fixed_comfy_quant_count} (nested params → flat)"
@@ -3459,7 +3348,6 @@ EXPERIMENTAL_ARGS = {
     "custom_heur",
     "fallback_block_size",
     "fallback_simple",
-    "kernel_backend",
     "heur",
     "scaling_mode",
     "block_size",
@@ -3577,7 +3465,6 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
             "fallback",
             "block_size",
             "scaling_mode",
-            "kernel_backend",
         ]
         for action in self._all_actions:
             if self._get_dest_name(action) in format_args:
@@ -3867,13 +3754,6 @@ def main():
         action="store_true",
         dest="fallback_simple",
         help="Use simple quantization for fallback-type layers",
-    )
-    parser.add_argument(
-        "--kernel_backend",
-        type=str,
-        default="blockwise",
-        choices=["blockwise", "lodewise"],
-        help="Kernel backend for INT8 quantization. 'blockwise' uses BlockWiseINT8Layout (2D tile-level scales), 'lodewise' uses Lode-Wise kernels (per-output-lane scales).",
     )
     parser.add_argument(
         "--simple",
@@ -4245,15 +4125,11 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
 
         # Use block_size from args or default to 128
         int8_block_size = args.block_size if args.block_size else 128
-        int8_kernel_backend = (
-            args.kernel_backend if hasattr(args, "kernel_backend") else "blockwise"
-        )
 
         convert_int8_to_comfy_quant(
             args.input,
             args.output,
             block_size=int8_block_size,
-            kernel_backend=int8_kernel_backend,
             include_input_scale=args.input_scale,
         )
         return
@@ -4348,16 +4224,6 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             "Note: --comfy_quant auto-enabled (required for --custom-type mixed precision)"
         )
         args.comfy_quant = True
-
-    # Check lodewise kernel backend availability
-    if args.kernel_backend == "lodewise" and not _HAS_LODEWISE:
-        print("ERROR: lodewise kernel backend requested but not available.")
-        print("       The kernels/int8_matmul.py module could not be imported.")
-        print("")
-        print(
-            "Fallback command: Remove '--kernel_backend lodewise' or use '--kernel_backend blockwise'"
-        )
-        sys.exit(1)
 
     # Only check FP8 support if not using INT8
     if not args.int8:
