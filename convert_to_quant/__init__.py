@@ -1,7 +1,7 @@
 """
 convert_to_quant - Quantization toolkit for neural network weights.
 
-Supports FP8, INT8 block-wise, NF4, and FP4 quantization formats
+Supports FP8 and INT8 block-wise quantization formats
 with learned rounding optimization for minimal accuracy loss.
 """
 
