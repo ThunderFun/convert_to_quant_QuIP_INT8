@@ -208,8 +208,8 @@ convert_to_quant -i model.safetensors --int8 --block_size 128 --comfy_quant --he
 ## Acknowledgements
 
 Special thanks to:
-- [Clybius](https://github.com/Clybius) – For inspiring me to take on quantization and his [Learned-Rounding](https://github.com/Clybius/Learned-Rounding) repository
-- [lyogavin](https://github.com/lyogavin) – For ComfyUI PR [#10864](https://github.com/comfyanonymous/ComfyUI/pull/10864) adding `comfy_quant` format support
+- [Clybius](https://github.com/Clybius) – For inspiring me to take on quantization and his [Learned-Rounding](https://github.com/Clybius/Learned-Rounding) repository.
+- [lyogavin](https://github.com/lyogavin) – For ComfyUI PR [#10864](https://github.com/comfyanonymous/ComfyUI/pull/10864) adding `int8_blockwise` format support and int8 kernels.
 
 ---
 
