@@ -14,7 +14,7 @@ import math
 import json
 from torch.optim import AdamW, RAdam
 from .comfy.quant_ops import BlockWiseINT8Layout
-from .pinned_transfer import transfer_to_gpu_pinned
+from .pinned_transfer import transfer_to_gpu_pinned, get_pinned_transfer_stats
 
 # --- Constants and Configuration ---
 torch.set_printoptions(precision=8)
@@ -3014,6 +3014,12 @@ def convert_to_fp8_scaled(
             f"  - Final tensor count    : {len(new_tensors)}",
         ]
     )
+    # Add pinned memory transfer stats
+    pinned_stats = get_pinned_transfer_stats()
+    if pinned_stats["pinned"] > 0 or pinned_stats["fallback"] > 0:
+        summary_parts.append(f"  - Pinned GPU transfers  : {pinned_stats['pinned']}")
+        if pinned_stats["fallback"] > 0:
+            summary_parts.append(f"  - Fallback transfers    : {pinned_stats['fallback']}")
     print("\n".join(summary_parts))
     print("-" * 60)
 
