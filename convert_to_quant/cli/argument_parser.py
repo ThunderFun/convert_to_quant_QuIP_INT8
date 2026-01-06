@@ -7,6 +7,8 @@ for experimental, filter, and advanced options.
 import argparse
 import sys
 
+from ..constants import MODEL_FILTERS
+
 
 # --- CLI Help Sections ---
 # Arguments categorized for multi-section help output
@@ -28,22 +30,8 @@ EXPERIMENTAL_ARGS = {
     "gen_layer_template",
 }
 
-FILTER_ARGS = {
-    "t5xxl",
-    "mistral",
-    "visual",
-    "flux2",
-    "distillation_large",
-    "distillation_small",
-    "nerf_large",
-    "nerf_small",
-    "radiance",
-    "wan",
-    "qwen",
-    "hunyuan",
-    "zimage",
-    "zimage_refiner",
-}
+# Generated from MODEL_FILTERS registry
+FILTER_ARGS = set(MODEL_FILTERS.keys())
 
 ADVANCED_ARGS = {
     "lr_shape_influence",
@@ -198,57 +186,33 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
         print("These flags keep certain model-specific layers in high precision")
         print("(not quantized). Multiple filters can be combined.")
         print()
-        print("Text Encoders:")
-        print("-" * 40)
-
-        text_args = ["t5xxl", "mistral", "visual"]
-        for action in self._all_actions:
-            if self._get_dest_name(action) in text_args:
-                line = self._format_action_help(action)
-                if line:
-                    print(line)
-
-        print()
-        print("Diffusion Models (Flux-style):")
-        print("-" * 40)
-
-        diffusion_args = [
-            "flux2",
-            "distillation_large",
-            "distillation_small",
-            "nerf_large",
-            "nerf_small",
-            "radiance",
-        ]
-        for action in self._all_actions:
-            if self._get_dest_name(action) in diffusion_args:
-                line = self._format_action_help(action)
-                if line:
-                    print(line)
-
-        print()
-        print("Video Models:")
-        print("-" * 40)
-
-        video_args = ["wan", "hunyuan"]
-        for action in self._all_actions:
-            if self._get_dest_name(action) in video_args:
-                line = self._format_action_help(action)
-                if line:
-                    print(line)
-
-        print()
-        print("Image Models:")
-        print("-" * 40)
-
-        image_args = ["qwen", "zimage", "zimage_refiner"]
-        for action in self._all_actions:
-            if self._get_dest_name(action) in image_args:
-                line = self._format_action_help(action)
-                if line:
-                    print(line)
-
-        print()
+        
+        # Group filters by category from MODEL_FILTERS registry
+        categories = {
+            "text": "Text Encoders",
+            "diffusion": "Diffusion Models (Flux-style)",
+            "video": "Video Models",
+            "image": "Image Models",
+        }
+        
+        for cat_key, cat_name in categories.items():
+            # Get filters in this category
+            cat_filters = [
+                name for name, cfg in MODEL_FILTERS.items()
+                if cfg.get("category") == cat_key
+            ]
+            if not cat_filters:
+                continue
+                
+            print(f"{cat_name}:")
+            print("-" * 40)
+            
+            for action in self._all_actions:
+                if self._get_dest_name(action) in cat_filters:
+                    line = self._format_action_help(action)
+                    if line:
+                        print(line)
+            print()
 
     def _print_advanced_help(self):
         """Print help for advanced LR tuning and early stopping options."""

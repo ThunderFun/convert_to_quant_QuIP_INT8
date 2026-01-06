@@ -18,20 +18,7 @@ from .argument_parser import (
 from ..constants import (
     NORMALIZE_SCALES_ENABLED,
     TARGET_FP8_DTYPE,
-    AVOID_KEY_NAMES,
-    VISUAL_AVOID_KEY_NAMES,
-    QWEN_AVOID_KEY_NAMES,
-    HUNYUAN_AVOID_KEY_NAMES,
-    ZIMAGE_AVOID_KEY_NAMES,
-    FLUX2_LAYER_KEYNAMES,
-    DISTILL_LAYER_KEYNAMES_LARGE,
-    DISTILL_LAYER_KEYNAMES_SMALL,
-    NERF_LAYER_KEYNAMES_LARGE,
-    NERF_LAYER_KEYNAMES_SMALL,
-    RADIANCE_LAYER_KEYNAMES,
-    WAN_LAYER_KEYNAMES,
-    ZIMAGE_LAYER_KEYNAMES,
-    ZIMAGE_REFINER_LAYER_KEYNAMES,
+    MODEL_FILTERS,
 )
 from ..config.layer_config import load_layer_config, generate_config_template
 from ..formats.fp8_conversion import convert_to_fp8_scaled
@@ -187,62 +174,13 @@ def main():
         action="store_true",
         help="Include input_scale tensor (fp32, 1.0) for quantized layers. Works with --convert-fp8-scaled and --convert-int8-scaled. Always enabled for T5XXL.",
     )
-    parser.add_argument(
-        "--t5xxl",
-        action="store_true",
-        help="Apply exclusions for T5XXL Text Encoder models.",
-    )
-    parser.add_argument(
-        "--mistral",
-        action="store_true",
-        help="Apply exclusions for Mistral Text Encoder models.",
-    )
-    parser.add_argument(
-        "--visual",
-        action="store_true",
-        help="Apply exclusions for Visual Text Encoder models.",
-    )
-    parser.add_argument(
-        "--flux2", action="store_true", help="Apply exclusions for Flux2 models."
-    )
-    parser.add_argument(
-        "--distillation_large",
-        action="store_true",
-        help="Exclude known distillation layers and other sensitive.",
-    )
-    parser.add_argument(
-        "--distillation_small",
-        action="store_true",
-        help="Exclude known distillation layers.",
-    )
-    parser.add_argument(
-        "--nerf_large",
-        action="store_true",
-        help="Exclude known NeRF layers, distillation layers and txt_in.",
-    )
-    parser.add_argument(
-        "--nerf_small",
-        action="store_true",
-        help="Exclude known NeRF layers and distillation layers.",
-    )
-    parser.add_argument(
-        "--radiance", action="store_true", help="Exclude known Radiance Field layers."
-    )
-    parser.add_argument("--wan", action="store_true", help="Exclude known WAN layers.")
-    parser.add_argument(
-        "--qwen", action="store_true", help="Exclude known Qwen Image layers."
-    )
-    parser.add_argument(
-        "--hunyuan", action="store_true", help="Exclude known Hunyuan Video 1.5 layers."
-    )
-    parser.add_argument(
-        "--zimage", action="store_true", help="Exclude known Z-Image layers."
-    )
-    parser.add_argument(
-        "--zimage_refiner",
-        action="store_true",
-        help="Exclude known Z-Image refiner layers (context_refiner, noise_refiner).",
-    )
+    # Model filter flags - generated from MODEL_FILTERS registry
+    for filter_name, filter_cfg in MODEL_FILTERS.items():
+        parser.add_argument(
+            f"--{filter_name}",
+            action="store_true",
+            help=filter_cfg.get("help", f"Apply {filter_name} model exclusions"),
+        )
     parser.add_argument(
         "--full_matrix",
         action="store_true",

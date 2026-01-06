@@ -129,6 +129,120 @@ ZIMAGE_LAYER_KEYNAMES = [
 ]
 ZIMAGE_REFINER_LAYER_KEYNAMES = ["context_refiner", "noise_refiner"]
 
+# --- Model Filter Registry ---
+# Each entry maps a CLI flag (--radiance, --flux2, etc.) to its layer patterns.
+# Keys:
+#   "help"     - Help text for CLI
+#   "category" - For grouping in --help-filters (text, diffusion, video, image)
+#   "exclude"  - Layers to skip quantization entirely (extends AVOID_KEY_NAMES)
+#   "highprec" - Layers to keep in high precision (not quantized)
+#   "remove"   - Layers to remove from output entirely (rare, e.g., T5XXL decoder)
+
+MODEL_FILTERS = {
+    # Text Encoders
+    "t5xxl": {
+        "help": "T5-XXL text encoder: skip norms/biases, remove decoder layers",
+        "category": "text",
+        "exclude": AVOID_KEY_NAMES,
+        "remove": T5XXL_REMOVE_KEY_NAMES,
+    },
+    "mistral": {
+        "help": "Mistral text encoder exclusions",
+        "category": "text",
+        "exclude": AVOID_KEY_NAMES,
+    },
+    "visual": {
+        "help": "Visual encoder: skip MLP layers (down/up/gate proj)",
+        "category": "text",
+        "exclude": VISUAL_AVOID_KEY_NAMES,
+    },
+    # Diffusion Models (Flux-style)
+    "flux2": {
+        "help": "Flux.2: keep modulation/guidance/time/final layers high-precision",
+        "category": "diffusion",
+        "highprec": FLUX2_LAYER_KEYNAMES,
+    },
+    "distillation_large": {
+        "help": "Chroma/distilled (large): keep distilled_guidance, final, img/txt_in high-precision",
+        "category": "diffusion",
+        "highprec": DISTILL_LAYER_KEYNAMES_LARGE,
+    },
+    "distillation_small": {
+        "help": "Chroma/distilled (small): keep only distilled_guidance high-precision",
+        "category": "diffusion",
+        "highprec": DISTILL_LAYER_KEYNAMES_SMALL,
+    },
+    "nerf_large": {
+        "help": "NeRF (large): keep nerf_blocks, distilled_guidance, txt_in high-precision",
+        "category": "diffusion",
+        "highprec": NERF_LAYER_KEYNAMES_LARGE,
+    },
+    "nerf_small": {
+        "help": "NeRF (small): keep nerf_blocks, distilled_guidance high-precision",
+        "category": "diffusion",
+        "highprec": NERF_LAYER_KEYNAMES_SMALL,
+    },
+    "radiance": {
+        "help": "Radiance model: keep img_in_patch, nerf_final_layer high-precision",
+        "category": "diffusion",
+        "highprec": RADIANCE_LAYER_KEYNAMES,
+    },
+    # Video Models
+    "wan": {
+        "help": "WAN video model: skip embeddings, encoders, head",
+        "category": "video",
+        "exclude": AVOID_KEY_NAMES,
+        "highprec": WAN_LAYER_KEYNAMES,
+    },
+    "hunyuan": {
+        "help": "Hunyuan Video 1.5: skip layernorm, attn norms, vision_in",
+        "category": "video",
+        "exclude": HUNYUAN_AVOID_KEY_NAMES,
+    },
+    # Image Models
+    "qwen": {
+        "help": "Qwen Image: skip added norms, keep time_text_embed high-precision",
+        "category": "image",
+        "exclude": QWEN_AVOID_KEY_NAMES,
+        "highprec": QWEN_LAYER_KEYNAMES,
+    },
+    "zimage": {
+        "help": "Z-Image: skip cap_embedder/norms, keep x_embedder/final high-precision",
+        "category": "image",
+        "exclude": ZIMAGE_AVOID_KEY_NAMES,
+        "highprec": ZIMAGE_LAYER_KEYNAMES,
+    },
+    "zimage_refiner": {
+        "help": "Z-Image Refiner: keep context/noise refiner high-precision",
+        "category": "image",
+        "exclude": ZIMAGE_AVOID_KEY_NAMES,
+        "highprec": ZIMAGE_REFINER_LAYER_KEYNAMES,
+    },
+}
+
+
+def build_exclusion_patterns(active_filters: dict) -> tuple:
+    """
+    Build layer exclusion patterns from active filter flags.
+    
+    Args:
+        active_filters: Dict of filter_name -> bool (e.g., {"radiance": True, "t5xxl": False})
+    
+    Returns:
+        Tuple of (exclude_patterns, highprec_patterns, remove_patterns)
+    """
+    exclude = []
+    highprec = []
+    remove = []
+    
+    for name, cfg in MODEL_FILTERS.items():
+        if active_filters.get(name, False):
+            exclude.extend(cfg.get("exclude", []))
+            highprec.extend(cfg.get("highprec", []))
+            remove.extend(cfg.get("remove", []))
+    
+    return exclude, highprec, remove
+
 # --- Dtype settings ---
 TARGET_FP8_DTYPE = torch.float8_e4m3fn
 TARGET_INT8_DTYPE = torch.int8

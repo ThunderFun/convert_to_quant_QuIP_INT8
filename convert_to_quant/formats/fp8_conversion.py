@@ -23,20 +23,7 @@ from ..constants import (
     INT8_SYMMETRIC_MAX,
     AVOID_KEY_NAMES,
     T5XXL_REMOVE_KEY_NAMES,
-    VISUAL_AVOID_KEY_NAMES,
-    QWEN_AVOID_KEY_NAMES,
-    HUNYUAN_AVOID_KEY_NAMES,
-    ZIMAGE_AVOID_KEY_NAMES,
-    FLUX2_LAYER_KEYNAMES,
-    DISTILL_LAYER_KEYNAMES_LARGE,
-    DISTILL_LAYER_KEYNAMES_SMALL,
-    NERF_LAYER_KEYNAMES_LARGE,
-    NERF_LAYER_KEYNAMES_SMALL,
-    RADIANCE_LAYER_KEYNAMES,
-    WAN_LAYER_KEYNAMES,
-    QWEN_LAYER_KEYNAMES,
-    ZIMAGE_LAYER_KEYNAMES,
-    ZIMAGE_REFINER_LAYER_KEYNAMES,
+    MODEL_FILTERS,
     VALID_QUANT_FORMATS,
     NORMALIZE_SCALES_ENABLED,
 )
@@ -286,55 +273,31 @@ def convert_to_fp8_scaled(
             layer_format = custom_type
 
         # Check exclusion filters (only matters if not custom matched and not layer_config matched)
+        # Uses MODEL_FILTERS registry for centralized filter definitions
         if not use_custom and not use_layer_config:
-            if (t5xxl or mistral) and any(n in key for n in AVOID_KEY_NAMES):
-                exclusion_reason = "T5XXL/Mistral exclusion"
-            elif visual and any(n in key for n in VISUAL_AVOID_KEY_NAMES):
-                exclusion_reason = "Visual exclusion"
-            elif radiance and any(n in key for n in RADIANCE_LAYER_KEYNAMES):
-                exclusion_reason = "Radiance exclusion"
-            elif wan and any(n in key for n in AVOID_KEY_NAMES):
-                exclusion_reason = "WAN exclusion"
-            elif qwen and any(n in key for n in QWEN_AVOID_KEY_NAMES):
-                exclusion_reason = "Qwen Image exclusion"
-            elif (zimage or zimage_refiner) and any(
-                n in key for n in ZIMAGE_AVOID_KEY_NAMES
-            ):
-                exclusion_reason = "Z-Image exclusion"
-            elif hunyuan and any(n in key for n in HUNYUAN_AVOID_KEY_NAMES):
-                exclusion_reason = "Hunyuan Video 1.5 exclusion"
-            elif flux2 and any(n in key for n in FLUX2_LAYER_KEYNAMES):
-                exclusion_reason = "Flux2 exclusion and keep in high precision"
-            elif distillation_large and any(
-                n in key for n in DISTILL_LAYER_KEYNAMES_LARGE
-            ):
-                exclusion_reason = (
-                    "Distillation layer and Chroma keep in high precision"
-                )
-            elif distillation_small and any(
-                n in key for n in DISTILL_LAYER_KEYNAMES_SMALL
-            ):
-                exclusion_reason = (
-                    "Distillation layer and Chroma keep in high precision"
-                )
-            elif nerf_large and any(n in key for n in NERF_LAYER_KEYNAMES_LARGE):
-                exclusion_reason = (
-                    "NeRF layer, distillation layer and txt_in keep in high precision"
-                )
-            elif nerf_small and any(n in key for n in NERF_LAYER_KEYNAMES_SMALL):
-                exclusion_reason = (
-                    "NeRF layer and distillation layer keep in high precision"
-                )
-            elif wan and any(n in key for n in WAN_LAYER_KEYNAMES):
-                exclusion_reason = "WAN layer keep in high precision"
-            elif qwen and any(n in key for n in QWEN_LAYER_KEYNAMES):
-                exclusion_reason = "Qwen Image layer keep in high precision"
-            elif zimage and any(n in key for n in ZIMAGE_LAYER_KEYNAMES):
-                exclusion_reason = "Z-Image layer keep in high precision"
-            elif zimage_refiner and any(
-                n in key for n in ZIMAGE_REFINER_LAYER_KEYNAMES
-            ):
-                exclusion_reason = "Z-Image refiner layer keep in high precision"
+            # Build dict of active filter flags from function locals
+            active_filters = {
+                name: locals().get(name, False) 
+                for name in MODEL_FILTERS.keys()
+            }
+            
+            # Check each active filter against the key
+            for filter_name, is_active in active_filters.items():
+                if not is_active:
+                    continue
+                cfg = MODEL_FILTERS[filter_name]
+                
+                # Check "exclude" patterns (layers to skip entirely)
+                exclude_patterns = cfg.get("exclude", [])
+                if exclude_patterns and any(n in key for n in exclude_patterns):
+                    exclusion_reason = f"{filter_name} exclusion"
+                    break
+                
+                # Check "highprec" patterns (layers to keep in high precision)
+                highprec_patterns = cfg.get("highprec", [])
+                if highprec_patterns and any(n in key for n in highprec_patterns):
+                    exclusion_reason = f"{filter_name} keep in high precision"
+                    break
 
         # Handle excluded layers: use fallback if available, otherwise skip
         if exclusion_reason and not use_custom and not use_layer_config:

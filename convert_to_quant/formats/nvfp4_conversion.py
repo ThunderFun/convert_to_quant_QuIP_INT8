@@ -16,19 +16,7 @@ from typing import Dict, Optional
 
 from ..constants import (
     AVOID_KEY_NAMES,
-    VISUAL_AVOID_KEY_NAMES,
-    QWEN_AVOID_KEY_NAMES,
-    HUNYUAN_AVOID_KEY_NAMES,
-    ZIMAGE_AVOID_KEY_NAMES,
-    FLUX2_LAYER_KEYNAMES,
-    DISTILL_LAYER_KEYNAMES_LARGE,
-    DISTILL_LAYER_KEYNAMES_SMALL,
-    NERF_LAYER_KEYNAMES_LARGE,
-    NERF_LAYER_KEYNAMES_SMALL,
-    RADIANCE_LAYER_KEYNAMES,
-    WAN_LAYER_KEYNAMES,
-    ZIMAGE_LAYER_KEYNAMES,
-    ZIMAGE_REFINER_LAYER_KEYNAMES,
+    MODEL_FILTERS,
     FP4_BLOCK_SIZE,
     NORMALIZE_SCALES_ENABLED,
     COMPUTE_DTYPE,
@@ -109,35 +97,22 @@ def convert_to_nvfp4(
     seed_generator = torch.Generator(device=seed_device)
     seed_generator.manual_seed(seed)
 
-    # Build exclusion list from filter flags (matching FP8 convention)
+    # Build exclusion list from filter flags using MODEL_FILTERS registry
     exclude_patterns = list(AVOID_KEY_NAMES)  # Base exclusions
     
-    if visual:
-        exclude_patterns.extend(VISUAL_AVOID_KEY_NAMES)
-    if qwen:
-        exclude_patterns.extend(QWEN_AVOID_KEY_NAMES)
-    if hunyuan:
-        exclude_patterns.extend(HUNYUAN_AVOID_KEY_NAMES)
-    if zimage or zimage_refiner:
-        exclude_patterns.extend(ZIMAGE_AVOID_KEY_NAMES)
-    if flux2:
-        exclude_patterns.extend(FLUX2_LAYER_KEYNAMES)
-    if distillation_large:
-        exclude_patterns.extend(DISTILL_LAYER_KEYNAMES_LARGE)
-    if distillation_small:
-        exclude_patterns.extend(DISTILL_LAYER_KEYNAMES_SMALL)
-    if nerf_large:
-        exclude_patterns.extend(NERF_LAYER_KEYNAMES_LARGE)
-    if nerf_small:
-        exclude_patterns.extend(NERF_LAYER_KEYNAMES_SMALL)
-    if radiance:
-        exclude_patterns.extend(RADIANCE_LAYER_KEYNAMES)
-    if wan:
-        exclude_patterns.extend(WAN_LAYER_KEYNAMES)
-    if zimage:
-        exclude_patterns.extend(ZIMAGE_LAYER_KEYNAMES)
-    if zimage_refiner:
-        exclude_patterns.extend(ZIMAGE_REFINER_LAYER_KEYNAMES)
+    # Build dict of active filter flags from function locals
+    active_filters = {
+        name: locals().get(name, False) 
+        for name in MODEL_FILTERS.keys()
+    }
+    
+    # Add patterns from active filters
+    for filter_name, is_active in active_filters.items():
+        if not is_active:
+            continue
+        cfg = MODEL_FILTERS[filter_name]
+        exclude_patterns.extend(cfg.get("exclude", []))
+        exclude_patterns.extend(cfg.get("highprec", []))
     
     # Select converter based on --simple flag
     if simple:

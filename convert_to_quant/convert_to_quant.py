@@ -36,6 +36,9 @@ from .constants import (
     INT8_SYMMETRIC_MAX,
     VALID_QUANT_FORMATS,
     NORMALIZE_SCALES_ENABLED,
+    # New registry
+    MODEL_FILTERS,
+    build_exclusion_patterns,
 )
 
 # Re-export utils
@@ -104,6 +107,9 @@ __all__ = [
     "INT8_SYMMETRIC_MAX",
     "VALID_QUANT_FORMATS",
     "NORMALIZE_SCALES_ENABLED",
+    # New registry
+    "MODEL_FILTERS",
+    "build_exclusion_patterns",
     # Utils
     "dict_to_tensor",
     "tensor_to_dict",

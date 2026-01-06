@@ -1,5 +1,41 @@
 # Development Log
 
+## 2026-01-06: Model Filter Registry Refactor
+
+### Session Summary
+Refactored scattered model filter flags into centralized `MODEL_FILTERS` registry. Adding a new filter now requires editing only `constants.py` instead of 6 files.
+
+---
+
+### Changes
+
+| File | Changes |
+|------|---------|
+| `constants.py` | Added `MODEL_FILTERS` dict registry + `build_exclusion_patterns()` helper |
+| `cli/argument_parser.py` | `FILTER_ARGS` now generated from registry keys, help sections use registry categories |
+| `cli/main.py` | Filter argument definitions now generated via loop from registry |
+| `formats/fp8_conversion.py` | 50-line conditional block replaced with 26-line registry-driven loop |
+| `formats/nvfp4_conversion.py` | Same pattern - exclusion list built from registry |
+| `convert_to_quant.py` | Added `MODEL_FILTERS`, `build_exclusion_patterns` to exports |
+
+### Adding New Filter
+
+```python
+# In constants.py - single file change
+MODEL_FILTERS["mymodel"] = {
+    "help": "My model exclusions",
+    "category": "diffusion",
+    "highprec": ["layer1", "layer2"],
+}
+```
+
+### Verification
+
+- Syntax check: ✅ All 6 files pass
+- CLI --help-filters: ✅ Filters display correctly from registry
+
+---
+
 ## 2026-01-06: NVFP4 Console Output & Bias Correction
 
 ### Session Summary
