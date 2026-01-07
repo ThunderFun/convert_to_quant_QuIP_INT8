@@ -25,6 +25,7 @@ from ..converters.nvfp4_converter import NVFP4Converter
 from ..converters.learned_nvfp4 import LearnedNVFP4Converter
 from ..utils.tensor_utils import dict_to_tensor, normalize_tensorwise_scales
 from ..utils.comfy_quant import should_skip_layer_for_performance
+from ..utils.memory_efficient_loader import UnifiedSafetensorsLoader
 
 
 def convert_to_nvfp4(
@@ -77,6 +78,8 @@ def convert_to_nvfp4(
     early_stop_stall: int = 1000,
     # Input scales (optional, from calibration or another NVFP4 model)
     input_scales: Optional[dict] = None,
+    # Memory mode
+    low_memory: bool = False,
 ) -> None:
     """
     Convert safetensors model to NVFP4 (FP4 E2M1) quantized format.
@@ -155,18 +158,19 @@ def convert_to_nvfp4(
     quantized_count = 0
     skipped_count = 0
     
-    # Load all tensors first for bias access
-    tensors: Dict[str, torch.Tensor] = {}
-    with safe_open(input_file, framework="pt", device="cpu") as f:
-        keys = list(f.keys())
-        print(f"Loading {len(keys)} tensors from source file...")
-        for key in keys:
-            tensors[key] = f.get_tensor(key)
+    # Load tensors using unified loader (handles both standard and low-memory modes)
+    try:
+        loader = UnifiedSafetensorsLoader(input_file, low_memory=low_memory)
+    except Exception as e:
+        print(f"FATAL: Error loading '{input_file}': {e}")
+        return
+    
+    all_keys = loader.keys()
     
     # Filter to only weight tensors for quantization
     weight_keys = sorted([
-        k for k in keys 
-        if k.endswith(".weight") and tensors[k].ndim == 2
+        k for k in all_keys 
+        if k.endswith(".weight") and loader.get_tensor(k).ndim == 2
     ])
     total_weights = len(weight_keys)
     
@@ -174,7 +178,7 @@ def convert_to_nvfp4(
     print("\nScanning model and generating simulated calibration data...")
     calibration_data_cache = {}
     for key in weight_keys:
-        tensor = tensors[key]
+        tensor = loader.get_tensor(key)
         if tensor.ndim == 2:
             in_features = tensor.shape[1]
             if in_features not in calibration_data_cache:
@@ -192,7 +196,7 @@ def convert_to_nvfp4(
     print("-" * 60)
     
     for i, key in enumerate(weight_keys):
-        tensor = tensors[key]
+        tensor = loader.get_tensor(key)
         base_key = key.rsplit(".weight", 1)[0]
         exclusion_reason = ""
         
@@ -254,15 +258,15 @@ def convert_to_nvfp4(
         
         # Bias correction (matching FP8 logic)
         bias_key = f"{base_key}.bias"
-        if bias_key in tensors:
+        if bias_key in all_keys:
             if simple:
                 # Skip bias correction for simple mode
                 print(f"  - Keeping original bias (simple mode): {bias_key}")
-                output_tensors[bias_key] = tensors[bias_key]
+                output_tensors[bias_key] = loader.get_tensor(bias_key)
             else:
                 print(f"  - Adjusting corresponding bias: {bias_key}")
                 with torch.no_grad():
-                    original_bias = tensors[bias_key]
+                    original_bias = loader.get_tensor(bias_key)
                     in_features = tensor.shape[1]
                     if in_features not in calibration_data_cache:
                         print("  - WARNING: No calibration data for bias correction.")
@@ -309,9 +313,12 @@ def convert_to_nvfp4(
             torch.cuda.empty_cache()
     
     # Copy non-weight tensors (bias handled above, copy others)
-    for key, tensor in tensors.items():
+    for key in all_keys:
         if key not in output_tensors:
-            output_tensors[key] = tensor
+            output_tensors[key] = loader.get_tensor(key)
+    
+    # Close loader
+    loader.close()
     
     # Normalize scales if enabled
     if NORMALIZE_SCALES_ENABLED:
@@ -334,7 +341,7 @@ def convert_to_nvfp4(
     
     print("-" * 60)
     print("Summary:")
-    print(f"  - Original tensor count : {len(tensors)}")
+    print(f"  - Original tensor count : {len(all_keys)}")
     print(f"  - Weights processed     : {quantized_count}")
     print(f"  - Weights skipped       : {skipped_count}")
     print(f"  - Final tensor count    : {len(output_tensors)}")

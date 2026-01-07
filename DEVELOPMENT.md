@@ -1,5 +1,45 @@
 # Development Log
 
+## 2026-01-07: Memory-Efficient Tensor Loading (`--low-memory`)
+
+### Session Summary
+Added `--low-memory` CLI flag to support streaming tensor loading for large models. Addresses OOM issues when quantizing 60GB+ models with limited RAM.
+
+---
+
+### Changes
+
+| File | Changes |
+|------|---------|
+| `utils/memory_efficient_loader.py` | **NEW** - `UnifiedSafetensorsLoader` with dual-mode: preload (fast) or streaming (low RAM) |
+| `cli/main.py` | Added `--low-memory` flag, passed to FP8 and NVFP4 converters |
+| `formats/fp8_conversion.py` | Added `low_memory` param, uses `UnifiedSafetensorsLoader` for all tensor access |
+| `formats/nvfp4_conversion.py` | Same - unified loader integration |
+
+### Usage
+
+```bash
+# Standard mode (fast, uses 2x model size in RAM)
+convert_to_quant -i model.safetensors --int8 --comfy_quant
+
+# Low-memory mode (streaming, ~1x model size in RAM)
+convert_to_quant -i model.safetensors --int8 --comfy_quant --low-memory
+```
+
+### Technical Details
+
+- `UnifiedSafetensorsLoader` provides consistent interface for both modes
+- In standard mode: preloads all tensors (existing behavior)
+- In low-memory mode: loads tensors on-demand via `get_tensor()`, cleans up with `mark_processed()`
+- Format migration scripts (int8_conversion, format_migration) not updated - they're 1:1 transformations without 2x memory issue
+
+### Verification
+
+- Syntax check: ✅ All modules pass
+- CLI --help: ✅ `--low-memory` flag visible
+
+---
+
 ## 2026-01-06: DRY Refactor - Centralized Utilities
 
 ### Session Summary

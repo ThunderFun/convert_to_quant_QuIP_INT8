@@ -7,6 +7,7 @@ FP8/INT8 quantization with learned rounding optimization.
 import gc
 import json
 import os
+import re
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -31,7 +32,9 @@ from ..converters.learned_rounding import LearnedRoundingConverter
 from ..config.layer_config import get_layer_settings
 from ..utils.tensor_utils import normalize_tensorwise_scales
 from ..utils.comfy_quant import create_comfy_quant_tensor, should_skip_layer_for_performance
+from ..utils.memory_efficient_loader import MemoryEfficientSafeOpen
 from ..pinned_transfer import get_pinned_transfer_stats
+
 
 def convert_to_fp8_scaled(
     input_file: str,
@@ -70,6 +73,7 @@ def convert_to_fp8_scaled(
     save_quant_metadata: bool = False,
     layer_config: Optional[Dict[str, Any]] = None,
     layer_config_fullmatch: bool = False,
+    low_memory: bool = False,
     **converter_kwargs,
 ):
     # Determine target format (priority: int8 > fp8)
@@ -104,15 +108,14 @@ def convert_to_fp8_scaled(
     else:
         comfy_quant = False
 
-    tensors: Dict[str, torch.Tensor] = {}
+    # Use unified loader (handles both standard and low-memory modes)
     try:
-        with safe_open(input_file, framework="pt", device="cpu") as f:
-            print(f"Loading {len(f.keys())} tensors from source file...")
-            for key in tqdm(f.keys(), desc="Loading tensors"):
-                tensors[key] = f.get_tensor(key)
+        loader = MemoryEfficientSafeOpen(input_file, low_memory=low_memory)
     except Exception as e:
         print(f"FATAL: Error loading '{input_file}': {e}")
         return
+    
+    all_keys = loader.keys()
 
     # Initialize metadata collection if enabled
     quant_metadata_layers = {} if save_quant_metadata else None
@@ -198,26 +201,28 @@ def convert_to_fp8_scaled(
 
     print("\nScanning model and generating simulated calibration data...")
     calibration_data_cache = {}
-    for key, tensor in tensors.items():
-        if key.endswith(".weight") and tensor.ndim == 2:
-            in_features = tensor.shape[1]
-            if in_features not in calibration_data_cache:
-                print(f"  - Found new input dimension: {in_features}.")
-                calibration_data_cache[in_features] = torch.randn(
-                    calib_samples,
-                    in_features,
-                    dtype=COMPUTE_DTYPE,
-                    generator=seed_generator,
-                    device=seed_device,
-                )
+    for key in all_keys:
+        if key.endswith(".weight"):
+            shape = loader.get_shape(key)
+            if len(shape) == 2:
+                in_features = shape[1]
+                if in_features not in calibration_data_cache:
+                    print(f"  - Found new input dimension: {in_features}.")
+                    calibration_data_cache[in_features] = torch.randn(
+                        calib_samples,
+                        in_features,
+                        dtype=COMPUTE_DTYPE,
+                        generator=seed_generator,
+                        device=seed_device,
+                    )
     print("Simulated calibration data generated.\n")
 
     new_tensors: Dict[str, torch.Tensor] = {}
     weight_keys = sorted(
         [
             key
-            for key in tensors.keys()
-            if key.endswith(".weight") and tensors[key].ndim == 2
+            for key in all_keys
+            if key.endswith(".weight") and loader.get_ndim(key) == 2
         ]
     )
     total_weights = len(weight_keys)
@@ -251,10 +256,11 @@ def convert_to_fp8_scaled(
             if layer_settings:
                 if layer_settings.get("skip", False):
                     print(f"({i+1}/{total_weights}) Skipping (layer-config): {key}")
-                    original_tensor = tensors[key]
+                    original_tensor = loader.get_tensor(key)
                     new_tensors[key] = original_tensor.to(
                         device="cpu", dtype=original_tensor.dtype
                     )
+                    loader.mark_processed(key)
                     skipped_count += 1
                     continue
                 use_layer_config = True
@@ -311,10 +317,11 @@ def convert_to_fp8_scaled(
                 print(
                     f"({i+1}/{total_weights}) Skipping tensor: {key} (Reason: {exclusion_reason})"
                 )
-                original_tensor = tensors[key]
+                original_tensor = loader.get_tensor(key)
                 new_tensors[key] = original_tensor.to(
                     device="cpu", dtype=original_tensor.dtype
                 )
+                loader.mark_processed(key)
                 skipped_count += 1
                 continue
 
@@ -334,7 +341,7 @@ def convert_to_fp8_scaled(
             print(f"({i+1}/{total_weights}) Processing ({format_name}): {key}")
 
         processed_count += 1
-        original_tensor = tensors[key]
+        original_tensor = loader.get_tensor(key)
 
         if original_tensor.numel() == 0 or original_tensor.ndim != 2:
             print(f"  - Skipping empty or non-2D tensor: {key}")
@@ -355,6 +362,7 @@ def convert_to_fp8_scaled(
                 new_tensors[key] = original_tensor.to(
                     device="cpu", dtype=original_tensor.dtype
                 )
+                loader.mark_processed(key)
                 skipped_count += 1
                 continue
 
@@ -513,15 +521,15 @@ def convert_to_fp8_scaled(
             else (fallback_simple if use_fallback else no_learned_rounding)
         )
 
-        if bias_key in tensors:
+        if bias_key in all_keys:
             if layer_uses_simple:
                 # Skip bias correction for simple mode (saves memory, avoids OOM on large layers)
                 print(f"  - Keeping original bias (simple mode): {bias_key}")
-                new_tensors[bias_key] = tensors[bias_key]
+                new_tensors[bias_key] = loader.get_tensor(bias_key)
             else:
                 print(f"  - Adjusting corresponding bias: {bias_key}")
                 with torch.no_grad():
-                    original_bias = tensors[bias_key]
+                    original_bias = loader.get_tensor(bias_key)
                     in_features = original_tensor.shape[1]
                     if in_features not in calibration_data_cache:
                         print("  - WARNING: No calibration data for bias correction.")
@@ -587,11 +595,15 @@ def convert_to_fp8_scaled(
                 )
         print("-" * 60)
 
-    for key, tensor in tensors.items():
+    # Copy remaining tensors (bias, norms, etc.)
+    for key in all_keys:
         if any(n in key for n in T5XXL_REMOVE_KEY_NAMES) and t5xxl:
             continue
         if key not in new_tensors:
-            new_tensors[key] = tensor
+            new_tensors[key] = loader.get_tensor(key)
+    
+    # Close loader to release file handle
+    loader.close()
 
     # Add scaled_fp8 marker only for legacy non-comfy_quant FP8 format
     # Use empty((0)) when input_scale is present (t5xxl, mistral, or --input_scale flag)
@@ -636,7 +648,7 @@ def convert_to_fp8_scaled(
     print("-" * 60)
     print("Summary:")
     summary_parts = [
-        f"  - Original tensor count : {len(tensors)}",
+        f"  - Original tensor count : {len(all_keys)}",
         f"  - Weights processed     : {processed_count}",
     ]
     if custom_count > 0:

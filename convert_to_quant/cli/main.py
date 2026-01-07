@@ -520,6 +520,14 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         help="Print per-tensor pinned memory transfer details",
     )
 
+    # Memory-efficient loading mode
+    parser.add_argument(
+        "--low-memory",
+        action="store_true",
+        dest="low_memory",
+        help="Use streaming tensor loading to reduce RAM usage (recommended for models >50%% of available RAM)",
+    )
+
     args = parser.parse_args()
 
     # Set global scale normalization flag from CLI
@@ -620,6 +628,8 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             "lr_threshold", "lr_adaptive_mode", "lr_shape_influence", "lr_threshold_mode",
             # Early stopping
             "early_stop_loss", "early_stop_lr", "early_stop_stall",
+            # Memory mode
+            "low_memory",
         }
         nvfp4_kwargs = {k: v for k, v in vars(args).items() if k in nvfp4_included}
 
@@ -897,6 +907,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         "layer_config",
         "layer_config_fullmatch",
         "save_quant_metadata",
+        "low_memory",
     ]
     converter_kwargs = {k: v for k, v in vars(args).items() if k not in excluded_keys}
 
@@ -942,6 +953,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         layer_config=layer_config_data,
         layer_config_fullmatch=args.layer_config_fullmatch,
         save_quant_metadata=args.save_quant_metadata,
+        low_memory=args.low_memory,
         **converter_kwargs,
     )
 
