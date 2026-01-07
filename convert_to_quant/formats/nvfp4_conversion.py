@@ -62,6 +62,8 @@ def convert_to_nvfp4(
     early_stop_loss: float = 1e-8,
     early_stop_lr: float = 1e-10,
     early_stop_stall: int = 1000,
+    # Scale optimization
+    scale_refinement_rounds: int = 1,
     # Input scales (optional, from calibration or another NVFP4 model)
     input_scales: Optional[dict] = None,
     # Memory mode
@@ -132,6 +134,7 @@ def convert_to_nvfp4(
             early_stop_loss=early_stop_loss,
             early_stop_lr=early_stop_lr,
             early_stop_stall=early_stop_stall,
+            scale_refinement_rounds=scale_refinement_rounds,
             lr=lr,
         )
         use_learned = True

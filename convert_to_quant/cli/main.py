@@ -331,6 +331,14 @@ def main():
         dest="early_stop_stall",
         help="Early stop when worse_loss_counter exceeds this. (default: 1000)",
     )
+    # NVFP4 scale optimization (--help-advanced)
+    parser.add_argument(
+        "--scale-refinement",
+        type=int,
+        default=1,
+        dest="scale_refinement_rounds",
+        help="[NVFP4] Number of scale refinement rounds (1=no refinement, 2+=iterative). (default: 1)",
+    )
     parser.add_argument(
         "--top_p",
         type=float,
@@ -693,6 +701,8 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             early_stop_loss=args.early_stop_loss,
             early_stop_lr=args.early_stop_lr,
             early_stop_stall=args.early_stop_stall,
+            # Scale optimization
+            scale_refinement_rounds=args.scale_refinement_rounds,
             # Input scales
             input_scales=input_scales,
             # Memory mode

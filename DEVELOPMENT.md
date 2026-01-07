@@ -1,5 +1,39 @@
 # Development Log
 
+## 2026-01-08: NVFP4 Iterative Scale Refinement
+
+### Session Summary
+Added iterative scale refinement for NVFP4 quantization. After learned rounding converges, block scales are recomputed from the optimized weights and optimization reruns with the new scales. This allows scales to better fit the learned values.
+
+---
+
+### Changes
+
+| File | Changes |
+|------|---------|
+| `converters/learned_nvfp4.py` | Added `scale_refinement_rounds` parameter, `_compute_block_scales()` helper, refinement loop in `convert()` |
+| `formats/nvfp4_conversion.py` | Pass `scale_refinement_rounds` to converter |
+| `cli/main.py` | Added `--scale-refinement` CLI argument |
+| `cli/argument_parser.py` | Added to `ADVANCED_ARGS` for `--help-advanced` |
+
+### Usage
+
+```bash
+# Default: no refinement (rounds=1)
+convert_to_quant -i model.safetensors --nvfp4
+
+# With 2 refinement rounds
+convert_to_quant -i model.safetensors --nvfp4 --scale-refinement 2
+```
+
+### Verification
+
+- Syntax check: ✅ All modules pass
+- Functional tests: ✅ All 6 tests pass (`test_cli_args.py`)
+
+---
+
+
 ## 2026-01-07: NVFP4 Comfy-Kitchen Compatibility
 
 ### Session Summary

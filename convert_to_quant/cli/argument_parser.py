@@ -39,6 +39,7 @@ ADVANCED_ARGS = {
     "early_stop_loss",
     "early_stop_lr",
     "early_stop_stall",
+    "scale_refinement_rounds",
 }
 
 class MultiHelpArgumentParser(argparse.ArgumentParser):
@@ -239,6 +240,17 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
         early_args = ["early_stop_loss", "early_stop_lr", "early_stop_stall"]
         for action in self._all_actions:
             if self._get_dest_name(action) in early_args:
+                line = self._format_action_help(action)
+                if line:
+                    print(line)
+
+        print()
+        print("NVFP4 Scale Optimization:")
+        print("-" * 40)
+
+        scale_args = ["scale_refinement_rounds"]
+        for action in self._all_actions:
+            if self._get_dest_name(action) in scale_args:
                 line = self._format_action_help(action)
                 if line:
                     print(line)
