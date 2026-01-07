@@ -1,5 +1,35 @@
 # Development Log
 
+## 2026-01-07: NVFP4 Comfy-Kitchen Compatibility
+
+### Session Summary
+Fixed NVFP4 quantization discrepancies to match comfy-kitchen exactly. Added kernel delegation when comfy-kitchen is available.
+
+---
+
+### Changes
+
+| File | Changes |
+|------|---------|
+| `converters/nvfp4_converter.py` | Uses `ck.quantize_nvfp4()`/`ck.dequantize_nvfp4()` when available; fixed PyTorch fallback |
+| `converters/learned_nvfp4.py` | Added comfy-kitchen check, removed `F8_E4M3_EPS` min clamp, added zero-block handling |
+
+### Discrepancies Fixed
+
+| Issue | Before | After |
+|-------|--------|-------|
+| Block scale clamp | `min=F8_E4M3_EPS, max=F8_E4M3_MAX` | `max=F8_E4M3_MAX` only |
+| Zero block handling | Divide-by-zero possible | Safe division with mask |
+| Kernel usage | Pure PyTorch only | comfy-kitchen when available |
+
+### Verification
+
+- Syntax check: ✅ All modules pass
+- Functional tests: ✅ All 6 tests pass (`test_cli_args.py`)
+
+---
+
+
 ## 2026-01-07: Converter Class Unification (Complete)
 
 ### Session Summary

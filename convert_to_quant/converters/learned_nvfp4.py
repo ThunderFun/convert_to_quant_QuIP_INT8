@@ -4,6 +4,8 @@ Learned Rounding NVFP4 (E2M1) Quantization Converter.
 Implements NVIDIA FP4 E2M1 block quantization with SVD-based learned rounding
 optimization. Inherits from BaseLearnedConverter for shared infrastructure.
 
+Uses comfy-kitchen CUDA/Triton kernels when available, with PyTorch fallback.
+
 Requires SM >= 10.0 (datacenter Blackwell) or SM >= 12.0 (consumer RTX 50 series).
 """
 import gc
@@ -21,7 +23,6 @@ from ..constants import (
     SCALE_DTYPE,
 )
 from ..utils.float_utils import (
-    F8_E4M3_EPS,
     F8_E4M3_MAX,
     roundup,
     pack_uint4,
@@ -36,6 +37,13 @@ from ..utils.float_utils import (
 )
 from ..pinned_transfer import transfer_to_gpu_pinned
 from .base_converter import BaseLearnedConverter
+
+# Check for comfy-kitchen availability
+try:
+    import comfy_kitchen as ck
+    HAS_COMFY_KITCHEN = True
+except ImportError:
+    HAS_COMFY_KITCHEN = False
 
 class LearnedNVFP4Converter(BaseLearnedConverter):
     """
@@ -129,18 +137,23 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
 
         # Scale block scales relative to per-tensor scale
         scaled_block_scales = block_scale_fp32 / per_tensor_scale
-        scaled_block_scales_fp8 = torch.clamp(scaled_block_scales, min=F8_E4M3_EPS, max=F8_E4M3_MAX)
+        # Match comfy-kitchen: only max clamp, no min clamp
+        scaled_block_scales_fp8 = torch.clamp(scaled_block_scales, max=F8_E4M3_MAX)
         scaled_block_scales_fp32 = _float8_round(scaled_block_scales_fp8)
 
         # Total scale for each block
         total_scale = per_tensor_scale * scaled_block_scales_fp32  # (M, N//16)
 
+        # Handle zero blocks (from padding): avoid 0/0 NaN - matches comfy-kitchen
+        zero_scale_mask = (total_scale == 0)
+        total_scale_safe = torch.where(zero_scale_mask, torch.ones_like(total_scale), total_scale)
+
         if self.no_learned_rounding:
             # Simple quantization without optimization
-            qdata = self._simple_quantize(W_float32, total_scale)
+            qdata = self._simple_quantize(W_float32, total_scale_safe, zero_scale_mask)
         else:
-            # Apply learned rounding optimization
-            qdata = self._optimize_nvfp4(W_float32, total_scale)
+            # Apply learned rounding optimization (uses safe scale internally)
+            qdata = self._optimize_nvfp4(W_float32, total_scale_safe, zero_scale_mask)
 
         # Pack to uint8
         data_packed = pack_uint4(qdata)
@@ -183,13 +196,15 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
         return qdata, block_scales, per_tensor_scale, dequantized
 
     def _simple_quantize(
-        self, W_float32: torch.Tensor, total_scale: torch.Tensor
+        self, W_float32: torch.Tensor, total_scale: torch.Tensor, zero_scale_mask: torch.Tensor
     ) -> torch.Tensor:
-        """Simple quantization without learned rounding."""
+        """Simple quantization without learned rounding (matches comfy-kitchen)."""
         M, N = W_float32.shape
         tensor_blocks = W_float32.reshape(M, -1, self.block_size)
 
         data_scaled = tensor_blocks / total_scale.unsqueeze(-1)
+        # Zero out blocks where scale was zero (padding)
+        data_scaled = torch.where(zero_scale_mask.unsqueeze(-1), torch.zeros_like(data_scaled), data_scaled)
         data_scaled = torch.clamp(data_scaled, -FP4_E2M1_MAX, FP4_E2M1_MAX)
         data_scaled = data_scaled.view(M, N)
 
@@ -213,7 +228,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
         return dequantized.view(M, N).to(COMPUTE_DTYPE)
 
     def _optimize_nvfp4(
-        self, W_float32: torch.Tensor, total_scale: torch.Tensor
+        self, W_float32: torch.Tensor, total_scale: torch.Tensor, zero_scale_mask: torch.Tensor
     ) -> torch.Tensor:
         """Apply learned rounding optimization for NVFP4."""
         M, N = W_float32.shape

@@ -4,6 +4,8 @@ NVFP4 (E2M1) Quantization Converter.
 Implements NVIDIA FP4 E2M1 block quantization with learned rounding optimization.
 Requires SM >= 10.0 (datacenter Blackwell) or SM >= 12.0 (consumer RTX 50 series).
 
+Uses comfy-kitchen CUDA/Triton kernels when available, with PyTorch fallback.
+
 Based on comfy-kitchen (Comfy Org, Apache-2.0) and PyTorch AO (Meta, BSD-3-Clause).
 """
 import math
@@ -17,7 +19,6 @@ from ..constants import (
     COMPUTE_DTYPE,
 )
 from ..utils.float_utils import (
-    F8_E4M3_EPS,
     F8_E4M3_MAX,
     roundup,
     pack_uint4,
@@ -31,11 +32,20 @@ from ..utils.float_utils import (
     F4_E2M1_MBITS,
 )
 
+# Check for comfy-kitchen availability
+try:
+    import comfy_kitchen as ck
+    HAS_COMFY_KITCHEN = True
+except ImportError:
+    HAS_COMFY_KITCHEN = False
+
+
 class NVFP4Converter:
     """
     NVIDIA FP4 E2M1 block quantization converter.
 
     Uses 16-element blocks with per-block FP8 scales and per-tensor global scale.
+    Delegates to comfy-kitchen kernels when available for exact compatibility.
 
     Args:
         block_size: Block size for quantization (default: 16, required by NVFP4)
@@ -77,6 +87,33 @@ class NVFP4Converter:
         Returns:
             Tuple of (quantized_data, block_scales, per_tensor_scale)
         """
+        device = tensor.device
+
+        # Compute per-tensor scale if not provided
+        # Formula: scale = amax / (F8_E4M3_MAX * F4_E2M1_MAX)
+        if per_tensor_scale is None:
+            amax = torch.amax(torch.abs(tensor))
+            per_tensor_scale = amax / (F8_E4M3_MAX * FP4_E2M1_MAX)
+
+        per_tensor_scale = per_tensor_scale.to(device=device, dtype=torch.float32)
+
+        # Use comfy-kitchen kernel if available
+        if HAS_COMFY_KITCHEN:
+            # CUDA kernel requires FP16/BF16 input (not float32)
+            qdata, block_scales = ck.quantize_nvfp4(
+                tensor.to(torch.bfloat16), per_tensor_scale, pad_16x=self.pad_to_16x
+            )
+            return qdata, block_scales, per_tensor_scale
+
+        # Fallback: PyTorch implementation (matches comfy-kitchen exactly)
+        return self._quantize_pytorch(tensor, per_tensor_scale)
+
+    def _quantize_pytorch(
+        self,
+        tensor: torch.Tensor,
+        per_tensor_scale: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pure PyTorch quantization fallback (matches comfy-kitchen exactly)."""
         orig_shape = tensor.shape
         device = tensor.device
 
@@ -91,33 +128,30 @@ class NVFP4Converter:
                 )
                 orig_shape = tensor.shape
 
-        # Compute per-tensor scale if not provided
-        # Formula: scale = amax / (F8_E4M3_MAX * F4_E2M1_MAX)
-        # This ensures block_scales fit in FP8 range when divided by per_tensor_scale
-        if per_tensor_scale is None:
-            amax = torch.amax(torch.abs(tensor))
-            per_tensor_scale = amax / (F8_E4M3_MAX * FP4_E2M1_MAX)
-
-        per_tensor_scale = per_tensor_scale.to(device=device, dtype=torch.float32)
-
         # Reshape to blocks
         tensor_blocks = tensor.reshape(orig_shape[0], -1, self.block_size)
 
         # Compute per-block scales
         block_max = torch.amax(torch.abs(tensor_blocks), dim=-1)
-        block_scale = block_max / FP4_E2M1_MAX
-        block_scale_fp32 = block_scale.to(torch.float32)
+        block_scale = block_max.to(torch.float32) / FP4_E2M1_MAX
 
-        # Scale block scales by per-tensor scale (so total_scale = per_tensor * block_scale)
-        scaled_block_scales = block_scale_fp32 / per_tensor_scale
-        scaled_block_scales_fp8 = torch.clamp(scaled_block_scales, min=F8_E4M3_EPS, max=F8_E4M3_MAX)
+        # Scale block scales by per-tensor scale
+        scaled_block_scales = block_scale / per_tensor_scale
+        # Match comfy-kitchen: only max clamp, no min clamp
+        scaled_block_scales_fp8 = torch.clamp(scaled_block_scales, max=F8_E4M3_MAX)
         scaled_block_scales_fp32 = _float8_round(scaled_block_scales_fp8)
 
         # Compute total scale for data
         total_scale = per_tensor_scale * scaled_block_scales_fp32
 
+        # Handle zero blocks (from padding): avoid 0/0 NaN - matches comfy-kitchen
+        zero_scale_mask = (total_scale == 0)
+        total_scale_safe = torch.where(zero_scale_mask, torch.ones_like(total_scale), total_scale)
+
         # Scale and quantize data
-        data_scaled = tensor_blocks / total_scale.unsqueeze(-1)
+        data_scaled = tensor_blocks.float() / total_scale_safe.unsqueeze(-1)
+        data_scaled = torch.where(zero_scale_mask.unsqueeze(-1), torch.zeros_like(data_scaled), data_scaled)
+
         data_scaled = torch.clamp(data_scaled, -FP4_E2M1_MAX, FP4_E2M1_MAX)
         data_scaled = data_scaled.view(orig_shape)
 
@@ -154,6 +188,21 @@ class NVFP4Converter:
         Returns:
             Dequantized tensor
         """
+        # Use comfy-kitchen kernel if available
+        if HAS_COMFY_KITCHEN:
+            return ck.dequantize_nvfp4(qdata, per_tensor_scale, block_scales, output_dtype)
+
+        # Fallback: PyTorch implementation
+        return self._dequantize_pytorch(qdata, per_tensor_scale, block_scales, output_dtype)
+
+    def _dequantize_pytorch(
+        self,
+        qdata: torch.Tensor,
+        per_tensor_scale: torch.Tensor,
+        block_scales: torch.Tensor,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        """Pure PyTorch dequantization fallback."""
         # Unpack FP4 data
         data_unpacked = unpack_uint4(qdata)
 
@@ -181,6 +230,7 @@ class NVFP4Converter:
 
         return data_dequantized.view(orig_shape).to(output_dtype)
 
+
 def quantize_nvfp4(
     tensor: torch.Tensor,
     per_tensor_scale: Optional[torch.Tensor] = None,
@@ -199,6 +249,7 @@ def quantize_nvfp4(
     """
     converter = NVFP4Converter(pad_to_16x=pad_to_16x, optimize=False)
     return converter.quantize(tensor, per_tensor_scale)
+
 
 def dequantize_nvfp4(
     qdata: torch.Tensor,
@@ -219,4 +270,4 @@ def dequantize_nvfp4(
         Dequantized tensor
     """
     converter = NVFP4Converter(optimize=False)
-    return converter.dequantize(qdata, block_scales, per_tensor_scale, output_dtype)
+    return converter.dequantize(qdata, per_tensor_scale, block_scales, output_dtype)
