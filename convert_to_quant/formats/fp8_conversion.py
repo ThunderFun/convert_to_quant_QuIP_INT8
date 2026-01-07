@@ -604,6 +604,12 @@ def convert_to_fp8_scaled(
     
     # Close loader to release file handle
     loader.close()
+    
+    # Free calibration data and force garbage collection before save
+    calibration_data_cache.clear()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Add scaled_fp8 marker only for legacy non-comfy_quant FP8 format
     # Use empty((0)) when input_scale is present (t5xxl, mistral, or --input_scale flag)
