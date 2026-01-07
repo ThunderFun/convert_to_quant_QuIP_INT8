@@ -1,9 +1,9 @@
 # Development Log
 
-## 2026-01-07: Converter Class Unification (Phase 1)
+## 2026-01-07: Converter Class Unification (Complete)
 
 ### Session Summary
-Created `BaseLearnedConverter` ABC to extract shared infrastructure from `LearnedRoundingConverter` and `LearnedNVFP4Converter`. Migrated NVFP4 converter to inherit from base class.
+Created `BaseLearnedConverter` ABC to extract shared infrastructure. Both `LearnedRoundingConverter` and `LearnedNVFP4Converter` now inherit from it.
 
 ---
 
@@ -11,20 +11,17 @@ Created `BaseLearnedConverter` ABC to extract shared infrastructure from `Learne
 
 | File | Changes |
 |------|---------|
-| `converters/base_converter.py` | **NEW** - Abstract base class with shared `__init__`, SVD computation, LR scheduling |
-| `converters/learned_nvfp4.py` | Inherits from `BaseLearnedConverter`, removed ~80 lines of duplicated init |
-| `converters/learned_rounding.py` | Replaced inline INT8 LR tiers with `adaptive_lr_update()` call (-32 lines) |
+| `converters/base_converter.py` | **NEW** - Abstract base class with shared `__init__` (17 params), SVD, LR, cleanup |
+| `converters/learned_nvfp4.py` | Inherits from base, only defines `block_size`, `pad_to_16x` (-80 lines) |
+| `converters/learned_rounding.py` | Inherits from base, only defines `scaling_mode`, `block_size`, `target_format` (-150 lines) |
 | `converters/__init__.py` | Added `BaseLearnedConverter` export |
 
-### Technical Details
+### Deduplication Summary
 
-- `BaseLearnedConverter` provides:
-  - Shared `__init__` with 17 common parameters (SVD, LR, early stopping)
-  - `_compute_svd_components()` for SVD computation
-  - `_adaptive_lr_update()` wrapper to centralized utility
-  - `_compute_shape_aware_plateau_params()` for plateau LR schedule
-  - `_cleanup_tensors()` for memory management
-- `LearnedNVFP4Converter` now only defines format-specific: `block_size`, `pad_to_16x`
+- **6 SVD computation blocks** → `_compute_svd_components()`
+- **Inline LR tier logic** → `_adaptive_lr_update()`  
+- **gc.collect/empty_cache patterns** → `_cleanup_tensors()`
+- **Shape-aware plateau params** → `_compute_shape_aware_plateau_params()`
 
 ### Verification
 
@@ -35,6 +32,7 @@ Created `BaseLearnedConverter` ABC to extract shared infrastructure from `Learne
 
 ```bash
 git checkout feature/converter-unification
+# Commits: 59df2e3, d243d96
 ```
 
 ---
