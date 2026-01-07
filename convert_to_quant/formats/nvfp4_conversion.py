@@ -31,21 +31,8 @@ from ..utils.memory_efficient_loader import UnifiedSafetensorsLoader
 def convert_to_nvfp4(
     input_file: str,
     output_file: str,
-    # Filter flags (matching FP8 convention)
-    t5xxl: bool = False,
-    mistral: bool = False,
-    visual: bool = False,
-    flux2: bool = False,
-    distillation_large: bool = False,
-    distillation_small: bool = False,
-    nerf_large: bool = False,
-    nerf_small: bool = False,
-    radiance: bool = False,
-    wan: bool = False,
-    qwen: bool = False,
-    hunyuan: bool = False,
-    zimage: bool = False,
-    zimage_refiner: bool = False,
+    # Filter flags (validated dict from CLI)
+    filter_flags: Dict[str, bool] = None,
     # Quantization options
     simple: bool = False,
     num_iter: int = 500,
@@ -103,11 +90,8 @@ def convert_to_nvfp4(
     # Build exclusion list from filter flags using MODEL_FILTERS registry
     exclude_patterns = list(AVOID_KEY_NAMES)  # Base exclusions
 
-    # Build dict of active filter flags from function locals
-    active_filters = {
-        name: locals().get(name, False)
-        for name in MODEL_FILTERS.keys()
-    }
+    # Use filter_flags dict passed from CLI (or empty if not provided)
+    active_filters = filter_flags or {}
 
     # Add patterns from active filters
     for filter_name, is_active in active_filters.items():

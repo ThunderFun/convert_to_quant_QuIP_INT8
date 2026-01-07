@@ -56,6 +56,30 @@ def load_input_scales(path: str) -> dict:
         raise ValueError(f"Unsupported input scales format: {path}. Use .json or .safetensors")
 
 
+def extract_filter_flags(args) -> dict:
+    """Extract model filter flags from parsed args with validation.
+
+    Validates that every filter in MODEL_FILTERS has a corresponding
+    argparse attribute. Fails fast if argparse is missing a filter,
+    which indicates a bug (filter added to constants.py but not argument_parser.py).
+
+    Args:
+        args: Parsed argparse namespace
+
+    Returns:
+        Dict mapping filter names to bool values, e.g. {"radiance": True, "t5xxl": False}
+    """
+    flags = {}
+    for name in MODEL_FILTERS.keys():
+        if not hasattr(args, name):
+            raise RuntimeError(
+                f"BUG: Filter '{name}' in MODEL_FILTERS but not in argparse. "
+                f"Add --{name} to argument_parser.py"
+            )
+        flags[name] = getattr(args, name)
+    return flags
+
+
 def main():
     parser = MultiHelpArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -612,26 +636,16 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             print("Error: Output file cannot be same as input.")
             return
 
-        # Build converter kwargs - use include-list pattern (matching legacy script)
-        # These are the parameters that convert_to_nvfp4 accepts
-        nvfp4_included = {
-            # Filter flags (from MODEL_FILTERS keys)
-            "t5xxl", "mistral", "visual", "flux2", "distillation_large",
-            "distillation_small", "nerf_large", "nerf_small", "radiance",
-            "wan", "qwen", "hunyuan", "zimage", "zimage_refiner",
-            # Quantization options
-            "simple", "num_iter", "heur",
-            # Optimizer/LR options
-            "optimizer", "lr", "lr_schedule", "top_p", "min_k", "max_k", "full_matrix",
-            # LR schedule tuning
-            "lr_gamma", "lr_patience", "lr_factor", "lr_min", "lr_cooldown",
-            "lr_threshold", "lr_adaptive_mode", "lr_shape_influence", "lr_threshold_mode",
-            # Early stopping
-            "early_stop_loss", "early_stop_lr", "early_stop_stall",
-            # Memory mode
-            "low_memory",
-        }
-        nvfp4_kwargs = {k: v for k, v in vars(args).items() if k in nvfp4_included}
+        # Compute seed early (same logic as FP8)
+        seed = (
+            int(torch.randint(0, 2**32 - 1, ()).item())
+            if args.manual_seed == -1
+            else args.manual_seed
+        )
+        print(f"Using seed: {seed}")
+
+        # Extract filter flags with validation
+        filter_flags = extract_filter_flags(args)
 
         # Load input scales if provided
         input_scales = None
@@ -642,11 +656,44 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             input_scales = load_input_scales(args.input_scales_path)
             print(f"Loaded {len(input_scales)} input scales from: {args.input_scales_path}")
 
+        # Call convert_to_nvfp4 with explicit args (no **kwargs footgun)
         convert_to_nvfp4(
             args.input,
             args.output,
+            # Filter flags
+            filter_flags=filter_flags,
+            # Quantization options
+            simple=args.simple,
+            num_iter=args.num_iter,
+            heur=args.heur,
+            calib_samples=args.calib_samples,
+            seed=seed,
+            # Optimizer/LR options
+            optimizer=args.optimizer,
+            lr=args.lr,
+            lr_schedule=args.lr_schedule,
+            top_p=args.top_p,
+            min_k=args.min_k,
+            max_k=args.max_k,
+            full_matrix=args.full_matrix,
+            # LR schedule tuning
+            lr_gamma=args.lr_gamma,
+            lr_patience=args.lr_patience,
+            lr_factor=args.lr_factor,
+            lr_min=args.lr_min,
+            lr_cooldown=args.lr_cooldown,
+            lr_threshold=args.lr_threshold,
+            lr_adaptive_mode=args.lr_adaptive_mode,
+            lr_shape_influence=args.lr_shape_influence,
+            lr_threshold_mode=args.lr_threshold_mode,
+            # Early stopping
+            early_stop_loss=args.early_stop_loss,
+            early_stop_lr=args.early_stop_lr,
+            early_stop_stall=args.early_stop_stall,
+            # Input scales
             input_scales=input_scales,
-            **nvfp4_kwargs,
+            # Memory mode
+            low_memory=args.low_memory,
         )
         return
 
@@ -841,22 +888,18 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         else:
             format_str = TARGET_FP8_DTYPE.__str__().split(".")[-1]
             scaling_str = f"_{args.scaling_mode}"
-        flags = "".join(
-            [
-                "_t5" if args.t5xxl else "",
-                "_mistral" if args.mistral else "",
-                "_visual" if args.visual else "",
-                "_flux2" if args.flux2 else "",
-                "_nodist_l" if args.distillation_large else "",
-                "_nodist_s" if args.distillation_small else "",
-                "_nonerf_l" if args.nerf_large else "",
-                "_nonerf_s" if args.nerf_small else "",
-                "_norad" if args.radiance else "",
-            ]
-        )
+        # Build filter flags dynamically from MODEL_FILTERS registry
+        filter_flags = extract_filter_flags(args)
+        active_filters = [name for name, active in filter_flags.items() if active]
+        flags = "".join(f"_{name}" for name in active_filters)
         output_file = f"{base}_{format_str}{scaling_str}{flags}_k{args.min_k}-{args.max_k}_p{args.top_p}_lr{args.lr}.safetensors"
     else:
         output_file = args.output
+
+    # Extract filter flags (needed for convert_to_fp8_scaled call)
+    # This is done after output filename logic to avoid duplicate call when auto-generating filename
+    if args.output:
+        filter_flags = extract_filter_flags(args)
 
     if os.path.abspath(args.input) == os.path.abspath(output_file):
         print("Error: Output file cannot be same as input.")
@@ -869,92 +912,70 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
     )
     print(f"Using seed: {seed}")
 
-    # Separate converter kwargs from function kwargs
-    excluded_keys = [
-        "input",
-        "output",
-        "comfy_quant",
-        "t5xxl",
-        "mistral",
-        "visual",
-        "flux2",
-        "distillation_large",
-        "distillation_small",
-        "nerf_large",
-        "nerf_small",
-        "radiance",
-        "wan",
-        "qwen",
-        "hunyuan",
-        "zimage",
-        "zimage_refiner",
-        "calib_samples",
-        "manual_seed",
-        "int8",
-        "fallback",
-        "custom_layers",
-        "custom_type",
-        "custom_block_size",
-        "custom_scaling_mode",
-        "custom_simple",
-        "custom_heur",
-        "fallback_block_size",
-        "fallback_simple",
-        "full_precision_matrix_mult",
-        "heur",
-        "input_scale",
-        "simple",
-        "layer_config",
-        "layer_config_fullmatch",
-        "save_quant_metadata",
-        "low_memory",
-    ]
-    converter_kwargs = {k: v for k, v in vars(args).items() if k not in excluded_keys}
-
     # Load layer config if specified
     layer_config_data = None
     if args.layer_config:
         layer_config_data = load_layer_config(args.layer_config)
 
+    # Call convert_to_fp8_scaled with explicit args (no **kwargs footgun)
     convert_to_fp8_scaled(
         args.input,
         output_file,
         args.comfy_quant,
-        args.t5xxl,
-        args.mistral,
-        args.visual,
-        args.flux2,
-        args.distillation_large,
-        args.distillation_small,
-        args.nerf_large,
-        args.nerf_small,
-        args.radiance,
-        args.wan,
-        args.qwen,
-        args.hunyuan,
-        args.zimage,
-        args.zimage_refiner,
-        args.calib_samples,
-        seed,
+        # Filter flags
+        filter_flags=filter_flags,
+        # Calibration
+        calib_samples=args.calib_samples,
+        seed=seed,
+        # Format options
         int8=args.int8,
         fallback=args.fallback,
+        # Custom layer options
         custom_layers=args.custom_layers,
         custom_type=args.custom_type,
         custom_block_size=args.custom_block_size,
         custom_scaling_mode=args.custom_scaling_mode,
         custom_simple=args.custom_simple,
         custom_heur=args.custom_heur,
+        # Fallback options
         fallback_block_size=args.fallback_block_size,
         fallback_simple=args.fallback_simple,
+        # Precision options
         full_precision_matrix_mult=args.full_precision_matrix_mult,
         skip_inefficient_layers=args.heur,
         include_input_scale=args.input_scale,
         no_learned_rounding=args.simple,
+        # Layer config
         layer_config=layer_config_data,
         layer_config_fullmatch=args.layer_config_fullmatch,
+        # Output options
         save_quant_metadata=args.save_quant_metadata,
         low_memory=args.low_memory,
-        **converter_kwargs,
+        # Optimizer/LR options (passed to LearnedRoundingConverter)
+        optimizer=args.optimizer,
+        num_iter=args.num_iter,
+        lr=args.lr,
+        lr_schedule=args.lr_schedule,
+        top_p=args.top_p,
+        min_k=args.min_k,
+        max_k=args.max_k,
+        full_matrix=args.full_matrix,
+        scaling_mode=args.scaling_mode,
+        block_size=args.block_size,
+        # LR schedule tuning
+        lr_gamma=args.lr_gamma,
+        lr_patience=args.lr_patience,
+        lr_factor=args.lr_factor,
+        lr_min=args.lr_min,
+        lr_cooldown=args.lr_cooldown,
+        lr_threshold=args.lr_threshold,
+        lr_adaptive_mode=args.lr_adaptive_mode,
+        lr_shape_influence=args.lr_shape_influence,
+        lr_threshold_mode=args.lr_threshold_mode,
+        # Early stopping
+        early_stop_loss=args.early_stop_loss,
+        early_stop_lr=args.early_stop_lr,
+        early_stop_stall=args.early_stop_stall,
     )
 
 

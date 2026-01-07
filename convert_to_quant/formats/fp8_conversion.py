@@ -40,20 +40,7 @@ def convert_to_fp8_scaled(
     input_file: str,
     output_file: str,
     comfy_quant: bool,
-    t5xxl: bool,
-    mistral: bool,
-    visual: bool,
-    flux2: bool,
-    distillation_large: bool,
-    distillation_small: bool,
-    nerf_large: bool,
-    nerf_small: bool,
-    radiance: bool,
-    wan: bool,
-    qwen: bool,
-    hunyuan: bool,
-    zimage: bool,
-    zimage_refiner: bool,
+    filter_flags: Dict[str, bool],
     calib_samples: int,
     seed: int,
     int8: bool = False,
@@ -242,8 +229,15 @@ def convert_to_fp8_scaled(
         layer_format = target_format  # default to primary
         layer_settings = None  # Per-layer settings from config
 
+        # Pre-compute text encoder filter for input scale handling
+        text_encoder_filter = (
+            filter_flags.get("t5xxl") or
+            filter_flags.get("mistral") or
+            filter_flags.get("visual")
+        )
+
         # T5XXL decoder tensors are always removed (not quantized, not kept)
-        if t5xxl and any(n in key for n in T5XXL_REMOVE_KEY_NAMES):
+        if filter_flags.get("t5xxl") and any(n in key for n in T5XXL_REMOVE_KEY_NAMES):
             print(f"({i+1}/{total_weights}) Removing T5XXL decoder tensor: {key}")
             skipped_count += 1
             continue
@@ -281,11 +275,8 @@ def convert_to_fp8_scaled(
         # Check exclusion filters (only matters if not custom matched and not layer_config matched)
         # Uses MODEL_FILTERS registry for centralized filter definitions
         if not use_custom and not use_layer_config:
-            # Build dict of active filter flags from function locals
-            active_filters = {
-                name: locals().get(name, False)
-                for name in MODEL_FILTERS.keys()
-            }
+            # Use filter_flags dict passed from CLI
+            active_filters = filter_flags
 
             # Check each active filter against the key
             for filter_name, is_active in active_filters.items():
@@ -503,8 +494,8 @@ def convert_to_fp8_scaled(
                 dequant_s.to(device="cpu", dtype=SCALE_DTYPE).detach().clone()
             )
             # Add scale_input for non-comfy mode: use dequant_s for t5xxl/mistral, ones for others
-            if include_input_scale or t5xxl or mistral or visual:
-                if t5xxl or mistral or visual:
+            if include_input_scale or text_encoder_filter:
+                if text_encoder_filter:
                     new_tensors[f"{base_name}.scale_input"] = (
                         dequant_s.to(device="cpu", dtype=SCALE_DTYPE).detach().clone()
                     )
@@ -569,7 +560,7 @@ def convert_to_fp8_scaled(
                             torch.cuda.empty_cache()
 
         # T5XXL/Mistral fallback: ensure input scale exists with correct key format
-        if t5xxl or mistral or visual:
+        if text_encoder_filter:
             if comfy_quant and f"{base_name}.input_scale" not in new_tensors:
                 new_tensors[f"{base_name}.input_scale"] = (
                     dequant_s.to(device="cpu", dtype=SCALE_DTYPE).detach().clone()
@@ -619,9 +610,14 @@ def convert_to_fp8_scaled(
         and not custom_layers
         and "scaled_fp8" not in new_tensors
     ):
+        has_text_encoder_filter = (
+            filter_flags.get("t5xxl") or
+            filter_flags.get("mistral") or
+            filter_flags.get("visual")
+        )
         new_tensors["scaled_fp8"] = (
             torch.empty((0), dtype=TARGET_FP8_DTYPE)
-            if (t5xxl or mistral or visual or include_input_scale)
+            if (has_text_encoder_filter or include_input_scale)
             else torch.empty((2), dtype=TARGET_FP8_DTYPE)
         )
 
