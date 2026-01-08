@@ -126,6 +126,13 @@ def main():
         help="Regex pattern for layers to quantize with custom type. Takes priority over exclusions.",
     )
     parser.add_argument(
+        "--exclude-layers",
+        type=str,
+        default=None,
+        dest="exclude_layers",
+        help="Regex pattern for layers to exclude from quantization (keep original precision or use fallback).",
+    )
+    parser.add_argument(
         "--custom-type",
         type=str,
         default=None,
@@ -682,6 +689,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
             args.output,
             # Filter flags
             filter_flags=filter_flags,
+            exclude_layers=args.exclude_layers,
             # Quantization options
             simple=args.simple,
             num_iter=args.num_iter,
@@ -959,6 +967,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         fallback=args.fallback,
         # Custom layer options
         custom_layers=args.custom_layers,
+        exclude_layers=args.exclude_layers,
         custom_type=args.custom_type,
         custom_block_size=args.custom_block_size,
         custom_scaling_mode=args.custom_scaling_mode,

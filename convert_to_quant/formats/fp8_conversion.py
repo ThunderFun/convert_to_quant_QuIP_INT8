@@ -45,6 +45,7 @@ def convert_to_fp8_scaled(
     int8: bool = False,
     fallback: Optional[str] = None,
     custom_layers: Optional[str] = None,
+    exclude_layers: Optional[str] = None,
     custom_type: Optional[str] = None,
     custom_block_size: Optional[int] = None,
     custom_scaling_mode: Optional[str] = None,
@@ -185,6 +186,16 @@ def convert_to_fp8_scaled(
             print(f"ERROR: Invalid regex pattern '{custom_layers}': {e}")
             return
 
+    # Compile exclude_layers regex pattern
+    exclude_pattern = None
+    if exclude_layers:
+        try:
+            exclude_pattern = re.compile(exclude_layers)
+            print(f"Layer exclusion enabled: pattern '{exclude_layers}'")
+        except re.error as e:
+            print(f"ERROR: Invalid regex pattern '{exclude_layers}': {e}")
+            return
+
     print("\nScanning model and generating simulated calibration data...")
     calibration_data_cache = {}
     for key in all_keys:
@@ -270,6 +281,10 @@ def convert_to_fp8_scaled(
         if not use_layer_config and custom_pattern and custom_pattern.search(key):
             use_custom = True
             layer_format = custom_type
+
+        # Check --exclude-layers regex pattern (third priority, only if not custom/layer_config matched)
+        if not use_custom and not use_layer_config and exclude_pattern and exclude_pattern.search(key):
+            exclusion_reason = "regex exclusion (--exclude-layers)"
 
         # Check exclusion filters (only matters if not custom matched and not layer_config matched)
         # Uses MODEL_FILTERS registry for centralized filter definitions

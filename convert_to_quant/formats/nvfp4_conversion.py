@@ -32,6 +32,7 @@ def convert_to_nvfp4(
     output_file: str,
     # Filter flags (validated dict from CLI)
     filter_flags: Dict[str, bool] = None,
+    exclude_layers: Optional[str] = None,
     # Quantization options
     simple: bool = False,
     num_iter: int = 500,
@@ -102,6 +103,17 @@ def convert_to_nvfp4(
         cfg = MODEL_FILTERS[filter_name]
         exclude_patterns.extend(cfg.get("exclude", []))
         exclude_patterns.extend(cfg.get("highprec", []))
+
+    # Compile --exclude-layers regex pattern
+    exclude_regex_pattern = None
+    if exclude_layers:
+        import re
+        try:
+            exclude_regex_pattern = re.compile(exclude_layers)
+            print(f"Layer exclusion enabled: pattern '{exclude_layers}'")
+        except re.error as e:
+            print(f"ERROR: Invalid regex pattern '{exclude_layers}': {e}")
+            return
 
     # Select converter based on --simple flag
     if simple:
@@ -188,9 +200,13 @@ def convert_to_nvfp4(
         base_key = key.rsplit(".weight", 1)[0]
         exclusion_reason = ""
 
-        # Check exclusion patterns
+        # Check exclusion patterns (substring match)
         if any(pattern in key for pattern in exclude_patterns):
             exclusion_reason = "Exclusion pattern match"
+
+        # Check --exclude-layers regex pattern
+        if not exclusion_reason and exclude_regex_pattern and exclude_regex_pattern.search(key):
+            exclusion_reason = "regex exclusion (--exclude-layers)"
 
         # Skip non-2D tensors (NVFP4 requires 2D)
         if tensor.dim() != 2:
