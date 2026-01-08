@@ -42,10 +42,16 @@ def add_legacy_input_scale(
     print(f"Output: {output_file}")
     print("-" * 60)
 
-    # Load input tensors
+    # Load input tensors and preserve original metadata
     tensors: Dict[str, torch.Tensor] = {}
+    original_metadata: Dict[str, str] = {}
     try:
         with safe_open(input_file, framework="pt", device="cpu") as f:
+            # Preserve original file metadata
+            original_metadata = f.metadata() or {}
+            if original_metadata:
+                print(f"Preserving {len(original_metadata)} original metadata entries")
+            
             print(f"Loading {len(f.keys())} tensors from source file...")
             for key in tqdm(f.keys(), desc="Loading tensors"):
                 tensors[key] = f.get_tensor(key)
@@ -128,7 +134,10 @@ def add_legacy_input_scale(
         output_tensors, normalized_count = normalize_tensorwise_scales(output_tensors, NORMALIZE_SCALES_ENABLED)
         if normalized_count > 0:
             print(f"  Normalized {normalized_count} scale tensors to scalars")
-        save_file(output_tensors, output_file)
+        
+        # Save with preserved metadata
+        save_kwargs = {"metadata": original_metadata} if original_metadata else {}
+        save_file(output_tensors, output_file, **save_kwargs)
 
         print("Conversion complete!")
     except Exception as e:
@@ -165,10 +174,16 @@ def cleanup_fp8_scaled(
         print("Adding missing scale_input: Yes")
     print("-" * 60)
 
-    # Load input tensors
+    # Load input tensors and preserve original metadata
     tensors: Dict[str, torch.Tensor] = {}
+    original_metadata: Dict[str, str] = {}
     try:
         with safe_open(input_file, framework="pt", device="cpu") as f:
+            # Preserve original file metadata
+            original_metadata = f.metadata() or {}
+            if original_metadata:
+                print(f"Preserving {len(original_metadata)} original metadata entries")
+            
             print(f"Loading {len(f.keys())} tensors from source file...")
             for key in tqdm(f.keys(), desc="Loading tensors"):
                 tensors[key] = f.get_tensor(key)
@@ -267,7 +282,10 @@ def cleanup_fp8_scaled(
         output_tensors, normalized_count = normalize_tensorwise_scales(output_tensors, NORMALIZE_SCALES_ENABLED)
         if normalized_count > 0:
             print(f"  Normalized {normalized_count} scale tensors to scalars")
-        save_file(output_tensors, output_file)
+        
+        # Save with preserved metadata
+        save_kwargs = {"metadata": original_metadata} if original_metadata else {}
+        save_file(output_tensors, output_file, **save_kwargs)
 
         print("Cleanup complete!")
     except Exception as e:
