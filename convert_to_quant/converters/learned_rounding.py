@@ -383,11 +383,19 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                 # ReduceLROnPlateau with cooldown (shape-aware)
                 if cooldown_counter > 0:
                     cooldown_counter -= 1
+                    debug(f"      [LR] Cooldown: {cooldown_counter} left")
                 elif plateau_counter >= effective_patience:
+                    debug(f"      [LR] Plateau {plateau_counter}/{effective_patience} reached. Decaying.")
                     if curr_lr > self.lr_min:
+                        old_lr = curr_lr
                         curr_lr = max(curr_lr * effective_factor, self.lr_min)
                         cooldown_counter = effective_cooldown
+                        debug(f"      [LR] Decay: {old_lr:.2e} -> {curr_lr:.2e} (Factor: {effective_factor:.4f})")
                     plateau_counter = 0
+                else:
+                    # Debug log to track patience accumulation
+                    if plateau_counter > 0:
+                         debug(f"      [LR] Waiting: {plateau_counter}/{effective_patience} (Loss: {current_loss:.3e})")
             else:  # 'adaptive' - tier-based schedule
                 # For no-reset mode, use counter value before reset for tier calculation
                 counter_for_tier = (
