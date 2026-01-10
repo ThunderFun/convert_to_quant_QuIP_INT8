@@ -294,11 +294,63 @@ def edit_comfy_quant(
         tensors[key] = dict_to_tensor(config)
         edited_count += 1
 
+    # Auto-create .comfy_quant tensors for layers in metadata but missing tensors
+    created_count = 0
+    if quant_metadata and "layers" in quant_metadata:
+        meta_layers = quant_metadata["layers"]
+        for layer_name, meta_entry in meta_layers.items():
+            comfy_quant_key = f"{layer_name}.comfy_quant"
+
+            # Skip if tensor already exists
+            if comfy_quant_key in tensors:
+                continue
+
+            # Apply layer filter
+            if layer_regex and not layer_regex.search(layer_name):
+                continue
+
+            # Check if the base weight tensor exists (sanity check)
+            weight_key = f"{layer_name}.weight"
+            if weight_key not in tensors:
+                continue
+
+            # Build config from metadata entry
+            config = {}
+            if "format" in meta_entry:
+                config["format"] = meta_entry["format"]
+            else:
+                # Try to infer format from weight dtype
+                weight = tensors[weight_key]
+                if weight.dtype == torch.float8_e4m3fn:
+                    config["format"] = "float8_e4m3fn"
+                elif weight.dtype == torch.int8:
+                    config["format"] = "int8_blockwise"
+                else:
+                    continue  # Can't determine format
+
+            # Copy relevant keys from metadata
+            for key in ["group_size", "full_precision_matrix_mult"]:
+                if key in meta_entry:
+                    config[key] = meta_entry[key]
+
+            # Apply add_keys if specified
+            if add_keys:
+                for k, v in add_keys.items():
+                    config[k] = v
+                    keys_added[k] = keys_added.get(k, 0) + 1
+
+            # Create the tensor
+            tensors[comfy_quant_key] = dict_to_tensor(config)
+            created_count += 1
+            print(f"  Created: {comfy_quant_key} (format={config.get('format', 'unknown')})")
+
     # Summary for .comfy_quant tensors
     print("-" * 60)
     print("Edit Summary (.comfy_quant tensors):")
     print(f"  Total tensors:              {total_comfy_quant}")
     print(f"  Edited:                     {edited_count}")
+    if created_count > 0:
+        print(f"  Created from metadata:      {created_count}")
     if skipped_filter > 0:
         print(f"  Skipped (filter):           {skipped_filter}")
     if skipped_no_change > 0:
