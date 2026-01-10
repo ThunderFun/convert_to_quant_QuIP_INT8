@@ -113,7 +113,10 @@ class UnifiedSafetensorsLoader:
 
         if offset_start != offset_end:
             self._file.seek(self._header_size + 8 + offset_start)
-            tensor_bytes = self._file.read(offset_end - offset_start)
+            # Use bytearray to create a writable buffer, avoiding PyTorch warning
+            # about non-writable tensors from read-only bytes.
+            tensor_bytes = bytearray(offset_end - offset_start)
+            self._file.readinto(tensor_bytes)
         else:
             tensor_bytes = None
 
