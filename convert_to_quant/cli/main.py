@@ -74,6 +74,9 @@ def extract_filter_flags(args) -> dict:
                 f"BUG: Filter '{name}' in MODEL_FILTERS but not in argparse. "
                 f"Add --{name} to argument_parser.py"
             )
+        if getattr(args, name):
+            flags[name] = True
+    return flags
 from ..utils.logging import setup_logging, info, minimal, warning
 
 def main():

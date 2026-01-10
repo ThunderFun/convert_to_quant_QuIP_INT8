@@ -30,6 +30,10 @@ Restructured project root by moving audit scripts to a dedicated `tests/` direct
     - `audit_check_args.py` -> `tests/test_cli_consistency.py`: Renamed and updated paths.
     - `.gitignore`: Added `flux2-dev-testlayers.safetensors` and `out_*.safetensors`.
 
+### 2026-01-11: Filter Flags Bug Fix
+Fixed a critical bug in `cli/main.py` where `extract_filter_flags` was missing a return statement, causing all model filters (e.g., `--qwen`, `--flux2`) to be ignored.
+- **Fixed**: `extract_filter_flags` now correctly populates and returns the flags dictionary.
+
 ---
 
 ## 2026-01-08: Critical FP8 Clamp Fix (Quality Issue)
