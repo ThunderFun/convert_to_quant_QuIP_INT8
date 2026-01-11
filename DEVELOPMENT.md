@@ -3,7 +3,7 @@
 ## 2026-01-11: Documentation & Package Execution Parity
 
 ### Session Summary
-Updated project documentation (`AGENTS.md`, `walkthrough.md`) with a comprehensive system map and workflow descriptions. Fixed package execution parity by creating `convert_to_quant/__main__.py`, ensuring `python -m convert_to_quant` matches `convert_to_quant` CLI. Refined implementation constraints in `AGENTS.md` based on user feedback.
+Updated project documentation (`AGENTS.md`, `walkthrough.md`) with a comprehensive system map and workflow descriptions. Refined implementation constraints in `AGENTS.md` based on user feedback.
 
 ---
 
@@ -12,13 +12,11 @@ Updated project documentation (`AGENTS.md`, `walkthrough.md`) with a comprehensi
 | File | Changes |
 |------|---------|
 | `AGENTS.md` | Added System Architecture & Workflows section; corrected Implementation Constraints (removed irrelevant core mods/heavy deps rules) |
-| `convert_to_quant/__main__.py` | **NEW** - Imports `main` from `cli.main` to enable `python -m convert_to_quant` |
 | `walkthrough.md` | Documented package execution fix and documentation updates |
 | `task.md` | Marked documentation tasks as complete |
 
 ### Verification
 
-- Package Parity: ✅ `python -m convert_to_quant --help` matches `convert_to_quant --help`
 - Documentation: ✅ `AGENTS.md` reflects current codebase structure and accurate constraints
 
 ### 2026-01-11: Test Suite Organization
@@ -368,10 +366,10 @@ Fixed NVFP4 output format to match NVIDIA FLUX.2-dev-NVFP4 structure. Added `--i
 
 ```bash
 # Quantize with calibrated input scales
-python -m convert_to_quant -i model.safetensors --nvfp4 --input-scales scales.json
+convert_to_quant -i model.safetensors --nvfp4 --input-scales scales.json
 
 # Or from another NVFP4 model
-python -m convert_to_quant -i model.safetensors --nvfp4 --input-scales reference_nvfp4.safetensors
+convert_to_quant -i model.safetensors --nvfp4 --input-scales reference_nvfp4.safetensors
 ```
 
 ### Format Comparison
@@ -412,8 +410,8 @@ Added NVIDIA FP4 E2M1 block quantization with two converters: raw (`NVFP4Convert
 ### Usage
 
 ```bash
-python -m convert_to_quant -i model.safetensors --nvfp4 --comfy_quant  # Optimized
-python -m convert_to_quant -i model.safetensors --nvfp4 --simple       # Raw
+convert_to_quant -i model.safetensors --nvfp4 --comfy_quant  # Optimized
+convert_to_quant -i model.safetensors --nvfp4 --simple       # Raw
 ```
 
 ### Git
