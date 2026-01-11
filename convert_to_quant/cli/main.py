@@ -587,6 +587,9 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
 
     args = parser.parse_args()
 
+    # Initialize logging framework with user's verbosity preference
+    setup_logging(args.verbose)
+
     # Set global scale normalization flag from CLI
     global NORMALIZE_SCALES_ENABLED
     NORMALIZE_SCALES_ENABLED = not args.no_normalize_scales

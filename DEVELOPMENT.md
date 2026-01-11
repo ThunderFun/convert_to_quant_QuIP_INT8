@@ -1,5 +1,28 @@
 # Development Log
 
+## 2026-01-11: Fix Missing Console Logging Output
+
+### Session Summary
+Fixed bug where no layer progress output `(X/Y) Processing...` or skip confirmations appeared during FP8/INT8 quantization. The logging framework was never initialized because `setup_logging(args.verbose)` was imported but never called.
+
+---
+
+### Bug Fixed
+
+| File | Bug | Impact |
+|------|-----|--------|
+| `cli/main.py` | `setup_logging(args.verbose)` never called after `parser.parse_args()` | All `info()`, `verbose()`, `debug()` calls silently dropped |
+
+### Fix
+Added `setup_logging(args.verbose)` call at line 591, immediately after argument parsing.
+
+### Symptoms (before fix)
+- No `(1/N) Processing tensor: ...` output
+- No `(1/N) Skipping tensor: ... (Reason: qwen keep in high precision)` for filtered layers like `img_in`
+- Only raw `print()` statements and tqdm progress bars visible
+
+---
+
 ## 2026-01-11: Documentation & Package Execution Parity
 
 ### Session Summary
