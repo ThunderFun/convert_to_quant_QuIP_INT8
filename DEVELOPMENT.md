@@ -38,7 +38,7 @@ Implemented MXFP8 block quantization format with E8M0 (power-of-2) block scaling
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| Learned mode: `loss=0.000e+00` | `_mxfp8_dequantize_blockwise` worked in pure float32 | Added `.to(MXFP8_DTYPE).float()` discretization step |
+| Learned mode: `loss=0.000e+00` | `_mxfp8_dequantize_blockwise` used unrounded float32 (zero error) | Added `W_q_initial` rounding for non-zero start loss + differentiable dequantize for valid gradients (fixed earlier broken gradient attempt) |
 
 ### Output Format
 ```

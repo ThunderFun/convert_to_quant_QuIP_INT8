@@ -296,18 +296,25 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         return qdata, block_scales_e8m0, block_scales_f32
 
     def _mxfp8_dequantize_blockwise(
-        self, qdata_float: torch.Tensor, block_scales_f32: torch.Tensor, M: int, N: int
+        self, qdata_float: torch.Tensor, block_scales_f32: torch.Tensor, M: int, N: int,
+        discretize: bool = True
     ) -> torch.Tensor:
         """
         Differentiable block-wise MXFP8 dequantization for optimization.
 
-        Includes FP8 discretization step to simulate actual quantization error.
+        Args:
+            discretize: If True, applies FP8 discretization (breaks gradients).
+                        Set to False for autograd-based optimizers (RAdam, AdamW).
         """
         num_blocks = N // self.block_size
         
-        # Apply FP8 discretization to simulate quantization error
-        # This is the key step that introduces error for optimization
-        qdata_discrete = qdata_float.to(MXFP8_DTYPE).float()
+        if discretize:
+            # Apply FP8 discretization to simulate quantization error
+            # Only use with torch.no_grad() contexts (original optimizer)
+            qdata_discrete = qdata_float.to(MXFP8_DTYPE).float()
+        else:
+            # Keep gradient flow for autograd optimizers
+            qdata_discrete = qdata_float
         
         data_blocks = qdata_discrete.reshape(M, num_blocks, self.block_size)
         dequantized = data_blocks * block_scales_f32.unsqueeze(-1)
@@ -445,6 +452,10 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         tensor_blocks = W_float32.reshape(M, num_blocks, self.block_size)
         W_q_initial = tensor_blocks / block_scales_f32.unsqueeze(-1)
         W_q_initial = torch.clamp(W_q_initial, -self.fp8_max, self.fp8_max)
+        
+        # Initialize with rounded values to ensure non-zero starting loss
+        W_q_initial = W_q_initial.to(MXFP8_DTYPE).float()
+        
         qdata_f32 = W_q_initial.view(M, N)
 
         delta = torch.zeros_like(qdata_f32, requires_grad=True)
@@ -475,7 +486,8 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
             optimizer.zero_grad()
 
             q_refined = qdata_f32 + delta
-            current_dq = self._mxfp8_dequantize_blockwise(q_refined, current_block_scales_f32, M, N)
+            # Use discretize=False to keep gradient flow for autograd optimizer
+            current_dq = self._mxfp8_dequantize_blockwise(q_refined, current_block_scales_f32, M, N, discretize=False)
 
             error = current_dq - W_float32
             projected_error = U_k.T @ error @ Vh_k.T
@@ -546,6 +558,10 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         tensor_blocks = W_float32.reshape(M, num_blocks, self.block_size)
         W_q_initial = tensor_blocks / block_scales_f32.unsqueeze(-1)
         W_q_initial = torch.clamp(W_q_initial, -self.fp8_max, self.fp8_max)
+        
+        # Initialize with rounded values to ensure non-zero starting loss
+        W_q_initial = W_q_initial.to(MXFP8_DTYPE).float()
+        
         qdata_f32 = W_q_initial.view(M, N)
 
         delta = torch.zeros_like(qdata_f32, requires_grad=True)
@@ -576,7 +592,8 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
             optimizer.zero_grad()
 
             q_refined = qdata_f32 + delta
-            current_dq = self._mxfp8_dequantize_blockwise(q_refined, current_block_scales_f32, M, N)
+            # Use discretize=False to keep gradient flow for autograd optimizer
+            current_dq = self._mxfp8_dequantize_blockwise(q_refined, current_block_scales_f32, M, N, discretize=False)
 
             error = current_dq - W_float32
             projected_error = U_k.T @ error @ Vh_k.T
@@ -636,12 +653,12 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
     ) -> bool:
         """Check early stopping conditions."""
         if self.early_stop_loss > 0 and current_loss < self.early_stop_loss:
-            debug("      - Loss is negligible. Stopping early.")
+            tqdm.write("      - Loss is negligible. Stopping early.")
             return True
         if self.early_stop_lr > 0 and curr_lr < self.early_stop_lr:
-            debug("      - Learning rate bottomed out. Stopping early.")
+            tqdm.write("      - Learning rate bottomed out. Stopping early.")
             return True
         if self.early_stop_stall > 0 and worse_loss_counter >= self.early_stop_stall:
-            debug("      - Stalled. Stopping early.")
+            tqdm.write("      - Stalled. Stopping early.")
             return True
         return False
