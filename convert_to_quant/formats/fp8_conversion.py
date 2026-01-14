@@ -122,10 +122,23 @@ def convert_to_fp8_scaled(
     block_size = converter_kwargs.get("block_size", 64)
 
     # Helper function to create converter for a specific format type
-    def create_converter_for_format(fmt: str, overrides: dict = None):
-        """Create appropriate converter instance for the given format."""
+    def create_converter_for_format(fmt: str, overrides: dict = None, is_primary: bool = True):
+        """Create appropriate converter instance for the given format.
+        
+        Args:
+            fmt: Format string (fp8, int8, mxfp8, nvfp4)
+            overrides: Parameter overrides for this specific converter
+            is_primary: If True, inherit no_learned_rounding from global --simple.
+                        If False (custom/fallback), only use override value.
+        """
         kwargs = converter_kwargs.copy()
         kwargs["target_format"] = fmt
+        
+        # Custom/fallback should NOT inherit global no_learned_rounding
+        # They use their own --custom-simple / --fallback-simple flags
+        if not is_primary:
+            kwargs["no_learned_rounding"] = False  # Default to learned rounding
+        
         if overrides:
             kwargs.update(overrides)
         
@@ -164,7 +177,7 @@ def convert_to_fp8_scaled(
         if fallback_simple:
             fallback_overrides["no_learned_rounding"] = True
         converters["fallback"] = create_converter_for_format(
-            fallback, fallback_overrides if fallback_overrides else None
+            fallback, fallback_overrides if fallback_overrides else None, is_primary=False
         )
         override_note = (
             f" (block_size={fallback_block_size})" if fallback_block_size else ""
@@ -184,7 +197,7 @@ def convert_to_fp8_scaled(
         if custom_simple:
             custom_overrides["no_learned_rounding"] = True
         converters["custom"] = create_converter_for_format(
-            custom_type, custom_overrides if custom_overrides else None
+            custom_type, custom_overrides if custom_overrides else None, is_primary=False
         )
         override_note = (
             f" (block_size={custom_block_size})" if custom_block_size else ""
