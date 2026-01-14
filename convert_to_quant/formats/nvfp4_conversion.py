@@ -39,7 +39,7 @@ def convert_to_nvfp4(
     simple: bool = False,
     num_iter: int = 500,
     heur: bool = False,
-    verbose: bool = True,
+    verbose_output: bool = True,  # kept for API compat, actual logging uses logging.py
     # Calibration options (for bias correction)
     calib_samples: int = 3072,
     seed: int = 42,
