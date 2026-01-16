@@ -1,5 +1,39 @@
 # Development Log
 
+## 2026-01-16: GitHub Actions Wheel Build Workflow
+
+### Session Summary
+Added GitHub Actions workflow for automated wheel builds and GitHub Releases.
+
+---
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `.github/workflows/build-wheels.yml` | CI/CD pipeline for wheel building and release |
+
+### Workflow Features
+
+| Feature | Description |
+|---------|-------------|
+| Trigger | Version tags (`v*.*.*`) + manual dispatch |
+| Build | Pure Python wheel + sdist on Ubuntu |
+| Test Matrix | Linux/Windows × Python 3.9-3.12 |
+| Release | Auto-creates GitHub Release with assets |
+
+### Usage
+
+```bash
+# Create and push a version tag
+git tag v0.8.0
+git push origin v0.8.0
+
+# Workflow auto-runs and creates release
+```
+
+---
+
 ## 2026-01-14: MXFP8/NVFP4 Custom Layer and Fallback Support
 
 ### Session Summary
