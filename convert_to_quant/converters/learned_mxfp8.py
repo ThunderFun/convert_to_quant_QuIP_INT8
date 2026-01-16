@@ -307,7 +307,7 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
                         Set to False for autograd-based optimizers (RAdam, AdamW).
         """
         num_blocks = N // self.block_size
-        
+
         if discretize:
             # Apply FP8 discretization to simulate quantization error
             # Only use with torch.no_grad() contexts (original optimizer)
@@ -315,7 +315,7 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         else:
             # Keep gradient flow for autograd optimizers
             qdata_discrete = qdata_float
-        
+
         data_blocks = qdata_discrete.reshape(M, num_blocks, self.block_size)
         dequantized = data_blocks * block_scales_f32.unsqueeze(-1)
         return dequantized.view(M, N)
@@ -452,10 +452,10 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         tensor_blocks = W_float32.reshape(M, num_blocks, self.block_size)
         W_q_initial = tensor_blocks / block_scales_f32.unsqueeze(-1)
         W_q_initial = torch.clamp(W_q_initial, -self.fp8_max, self.fp8_max)
-        
+
         # Initialize with rounded values to ensure non-zero starting loss
         W_q_initial = W_q_initial.to(MXFP8_DTYPE).float()
-        
+
         qdata_f32 = W_q_initial.view(M, N)
 
         delta = torch.zeros_like(qdata_f32, requires_grad=True)
@@ -558,10 +558,10 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         tensor_blocks = W_float32.reshape(M, num_blocks, self.block_size)
         W_q_initial = tensor_blocks / block_scales_f32.unsqueeze(-1)
         W_q_initial = torch.clamp(W_q_initial, -self.fp8_max, self.fp8_max)
-        
+
         # Initialize with rounded values to ensure non-zero starting loss
         W_q_initial = W_q_initial.to(MXFP8_DTYPE).float()
-        
+
         qdata_f32 = W_q_initial.view(M, N)
 
         delta = torch.zeros_like(qdata_f32, requires_grad=True)

@@ -9,7 +9,7 @@ def run_test(name, cmd_args, expected_file=None):
     base_cmd = ["convert_to_quant"]
     full_cmd = base_cmd + cmd_args
     print(f"Command: {' '.join(full_cmd)}")
-    
+
     try:
         # shell=True might be needed on Windows to find the shim in Scripts
         subprocess.run(full_cmd, check=True, shell=True)
@@ -43,7 +43,7 @@ def main():
         print(f"Error: Test file '{input_file}' not found.")
         print("Usage: python tests/test_functional.py [input_file]")
         return
-    
+
     print(f"Using input file: {input_file}")
 
     tests = [
@@ -113,9 +113,9 @@ def main():
     for t in tests:
         if run_test(t["name"], t["args"], t["expected"]):
             passed += 1
-    
+
     print(f"\nSummary: {passed}/{len(tests)} tests passed.")
-    
+
     # Cleanup
     print("\nCleaning up output files...")
     for t in tests:

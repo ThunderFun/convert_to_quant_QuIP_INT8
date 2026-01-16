@@ -52,7 +52,7 @@ def add_legacy_input_scale(
             original_metadata = f.metadata() or {}
             if original_metadata:
                 print(f"Preserving {len(original_metadata)} original metadata entries")
-            
+
             print(f"Loading {len(f.keys())} tensors from source file...")
             for key in tqdm(f.keys(), desc="Loading tensors"):
                 tensors[key] = f.get_tensor(key)
@@ -135,7 +135,7 @@ def add_legacy_input_scale(
         output_tensors, normalized_count = normalize_tensorwise_scales(output_tensors, NORMALIZE_SCALES_ENABLED)
         if normalized_count > 0:
             verbose(f"  Normalized {normalized_count} scale tensors to scalars")
-        
+
         # Save with preserved metadata
         save_kwargs = {"metadata": original_metadata} if original_metadata else {}
         save_file(output_tensors, output_file, **save_kwargs)
@@ -184,7 +184,7 @@ def cleanup_fp8_scaled(
             original_metadata = f.metadata() or {}
             if original_metadata:
                 print(f"Preserving {len(original_metadata)} original metadata entries")
-            
+
             print(f"Loading {len(f.keys())} tensors from source file...")
             for key in tqdm(f.keys(), desc="Loading tensors"):
                 tensors[key] = f.get_tensor(key)
@@ -283,7 +283,7 @@ def cleanup_fp8_scaled(
         output_tensors, normalized_count = normalize_tensorwise_scales(output_tensors, NORMALIZE_SCALES_ENABLED)
         if normalized_count > 0:
             verbose(f"  Normalized {normalized_count} scale tensors to scalars")
-        
+
         # Save with preserved metadata
         save_kwargs = {"metadata": original_metadata} if original_metadata else {}
         save_file(output_tensors, output_file, **save_kwargs)

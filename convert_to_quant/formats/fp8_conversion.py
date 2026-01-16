@@ -130,7 +130,7 @@ def convert_to_fp8_scaled(
     # Helper function to create converter for a specific format type
     def create_converter_for_format(fmt: str, overrides: dict = None, is_primary: bool = True):
         """Create appropriate converter instance for the given format.
-        
+
         Args:
             fmt: Format string (fp8, int8, mxfp8, nvfp4)
             overrides: Parameter overrides for this specific converter
@@ -139,23 +139,23 @@ def convert_to_fp8_scaled(
         """
         kwargs = converter_kwargs.copy()
         kwargs["target_format"] = fmt
-        
+
         # Custom/fallback should NOT inherit global no_learned_rounding
         # They use their own --custom-simple / --fallback-simple flags
         if not is_primary:
             kwargs["no_learned_rounding"] = False  # Default to learned rounding
-        
+
         if overrides:
             kwargs.update(overrides)
-        
+
         if fmt == "mxfp8":
             # MXFP8 has fixed block_size=32, remove incompatible kwargs
-            mxfp8_kwargs = {k: v for k, v in kwargs.items() 
+            mxfp8_kwargs = {k: v for k, v in kwargs.items()
                            if k not in ("target_format", "scaling_mode", "block_size")}
             return LearnedMXFP8Converter(**mxfp8_kwargs)
         elif fmt == "nvfp4":
             # NVFP4 has fixed block_size=16, remove incompatible kwargs
-            nvfp4_kwargs = {k: v for k, v in kwargs.items() 
+            nvfp4_kwargs = {k: v for k, v in kwargs.items()
                            if k not in ("target_format", "scaling_mode", "block_size")}
             return LearnedNVFP4Converter(**nvfp4_kwargs)
         else:

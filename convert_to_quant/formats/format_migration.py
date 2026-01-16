@@ -60,7 +60,7 @@ def convert_fp8_scaled_to_comfy_quant(
             original_metadata = f.metadata() or {}
             if original_metadata:
                 verbose(f"Preserving {len(original_metadata)} original metadata entries")
-            
+
             minimal(f"Loading {len(f.keys())} tensors from source file...")
             for key in tqdm(f.keys(), desc="Loading tensors"):
                 tensors[key] = f.get_tensor(key)
@@ -358,14 +358,14 @@ def convert_fp8_scaled_to_comfy_quant(
 
         # Prepare metadata args - merge original metadata with new quantization metadata
         output_metadata = dict(original_metadata)  # Start with original metadata
-        
+
         if save_quant_metadata and quant_metadata_layers:
             full_metadata = {"format_version": "1.0", "layers": quant_metadata_layers}
             output_metadata["_quantization_metadata"] = json.dumps(full_metadata)
             verbose(
                 f"  Adding quantization metadata for {len(quant_metadata_layers)} layers"
             )
-        
+
         save_kwargs = {"metadata": output_metadata} if output_metadata else {}
 
         # Normalize any 1-element scale tensors to scalars

@@ -10,12 +10,12 @@ class MockScheduler:
         self.lr_factor = factor
         self.lr_shape_influence = shape_influence
         self.lr_min = 1e-8
-        
+
         # State
         self.plateau_counter = 0
         self.cooldown_counter = 0
         self.curr_lr = 1e-3
-        
+
         # Logic from LearnedRoundingConverter
         if shape_influence > 0:
             ar_factor = math.sqrt(aspect_ratio)
@@ -29,16 +29,16 @@ class MockScheduler:
             self.effective_patience = self.lr_patience
             self.effective_factor = self.lr_factor
             self.effective_cooldown = self.lr_cooldown
-        
+
         print(f"Schedule: {self.lr_schedule} | Patience: {self.effective_patience} | Factor: {self.effective_factor:.4f}")
 
     def step(self, improved):
         if improved:
             self.plateau_counter = 0
             return "Improved"
-        
+
         self.plateau_counter += 1
-        
+
         if self.lr_schedule == "plateau":
             if self.cooldown_counter > 0:
                 self.cooldown_counter -= 1

@@ -308,7 +308,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
 
     def _ste_fp8_scale(self, scale_float: torch.Tensor) -> torch.Tensor:
         """Apply Straight-Through Estimator for FP8 scale quantization.
-        
+
         Forward: Returns FP8-quantized scale values
         Backward: Gradients flow through as if no quantization occurred
         """
@@ -555,7 +555,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
         per_tensor_scale: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """NVFP4 optimization using AdamW optimizer.
-        
+
         Supports scale_optimization modes: fixed, iterative (not implemented), joint (STE).
         """
         M, N = W_float32.shape
@@ -605,7 +605,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
             if self.scale_optimization == "joint":
                 block_scales_ste = self._ste_fp8_scale(block_scales_float)
                 current_total_scale = per_tensor_scale * block_scales_ste
-            
+
             current_dq = self._nvfp4_dequantize_blockwise(q_refined, current_total_scale, M, N)
 
             error = current_dq - W_float32
@@ -675,7 +675,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
         per_tensor_scale: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """NVFP4 optimization using RAdam optimizer.
-        
+
         Supports scale_optimization modes: fixed, iterative (not implemented), joint (STE).
         """
         M, N = W_float32.shape
@@ -725,7 +725,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
             if self.scale_optimization == "joint":
                 block_scales_ste = self._ste_fp8_scale(block_scales_float)
                 current_total_scale = per_tensor_scale * block_scales_ste
-            
+
             current_dq = self._nvfp4_dequantize_blockwise(q_refined, current_total_scale, M, N)
 
             error = current_dq - W_float32

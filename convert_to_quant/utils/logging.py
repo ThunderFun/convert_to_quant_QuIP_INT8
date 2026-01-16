@@ -15,8 +15,8 @@ VERBOSE_LEVEL = 15 # Custom level between INFO and DEBUG
 DEBUG_LEVEL = 10   # logging.DEBUG
 
 logging.addLevelName(VERBOSE_LEVEL, "VERBOSE")
-logging.addLevelName(MINIMAL_LEVEL, "MINIMAL") # Alias for warning basically, or custom? 
-# Actually if MINIMAL is just WARNING, we can just use WARNING. 
+logging.addLevelName(MINIMAL_LEVEL, "MINIMAL") # Alias for warning basically, or custom?
+# Actually if MINIMAL is just WARNING, we can just use WARNING.
 # But let's define specific levels to be clear.
 
 class CustomFormatter(logging.Formatter):
@@ -33,7 +33,7 @@ class CustomFormatter(logging.Formatter):
         else:
             # Minimal/Warning
             self._style._fmt = "[%(levelname)s] %(message)s"
-            
+
         return super().format(record)
 
 def setup_logging(verbose_arg: str = "NORMAL"):
@@ -46,20 +46,20 @@ def setup_logging(verbose_arg: str = "NORMAL"):
         "NORMAL": NORMAL_LEVEL,
         "MINIMAL": MINIMAL_LEVEL
     }
-    
+
     level = level_map.get(verbose_arg.upper(), NORMAL_LEVEL)
-    
+
     logger = logging.getLogger("convert_to_quant")
     logger.setLevel(level)
-    
+
     # Clear existing handlers to prevent duplicates
     if logger.handlers:
         logger.handlers.clear()
-        
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(CustomFormatter())
     logger.addHandler(handler)
-        
+
     return logger
 
 def get_logger():
@@ -78,9 +78,9 @@ def log_debug(func):
             all_args = ", ".join(filter(None, [arg_str, kw_str]))
             # Limit arg string info?
             logger.log(DEBUG_LEVEL, f"CALL {func.__name__}({all_args})")
-            
+
         result = func(*args, **kwargs)
-        
+
         if logger.isEnabledFor(DEBUG_LEVEL):
              logger.log(DEBUG_LEVEL, f"RET {func.__name__} -> {type(result)}")
         return result

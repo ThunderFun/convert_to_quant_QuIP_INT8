@@ -668,7 +668,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
     if args.nvfp4:
         # Check if we need mixed format support
         needs_mixing = args.custom_type or args.fallback
-        
+
         if needs_mixing:
             # Route through unified path for mixed format support
             print("NVFP4 with custom/fallback: using unified quantization path")
@@ -768,7 +768,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
     if args.mxfp8:
         # Check if we need mixed format support
         needs_mixing = args.custom_type or args.fallback
-        
+
         if needs_mixing:
             # Route through unified path for mixed format support
             print("MXFP8 with custom/fallback: using unified quantization path")
@@ -1084,7 +1084,7 @@ In JSON, backslashes must be doubled (\\\\. for literal dot). See DEVELOPMENT.md
         primary_format = "nvfp4"
     elif args.mxfp8 and (args.custom_type or args.fallback):
         primary_format = "mxfp8"
-    
+
     convert_to_fp8_scaled(
         args.input,
         output_file,

@@ -16,25 +16,25 @@ from typing import Dict, List, Tuple, Optional
 
 class CodeAnalyzer(ast.NodeVisitor):
     """Analyze Python source code structure using AST."""
-    
+
     def __init__(self):
         self.functions: List[Dict] = []
         self.classes: List[Dict] = []
         self.imports: List[str] = []
         self.from_imports: List[Tuple[str, List[str]]] = []
         self.current_class: Optional[str] = None
-    
+
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             self.imports.append(alias.name)
         self.generic_visit(node)
-    
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
         names = [alias.name for alias in node.names]
         self.from_imports.append((module, names))
         self.generic_visit(node)
-    
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if self.current_class is None:
             # Top-level function
@@ -47,10 +47,10 @@ class CodeAnalyzer(ast.NodeVisitor):
                 "args": [arg.arg for arg in node.args.args],
             })
         self.generic_visit(node)
-    
+
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self.visit_FunctionDef(node)  # type: ignore
-    
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         methods = []
         for child in node.body:
@@ -61,7 +61,7 @@ class CodeAnalyzer(ast.NodeVisitor):
                     "end_line": child.end_lineno or child.lineno,
                     "lines": (child.end_lineno or child.lineno) - child.lineno + 1,
                 })
-        
+
         self.classes.append({
             "name": node.name,
             "start_line": node.lineno,
@@ -70,7 +70,7 @@ class CodeAnalyzer(ast.NodeVisitor):
             "methods": methods,
             "docstring": ast.get_docstring(node),
         })
-        
+
         # Don't recurse into class - we already extracted methods
         # self.generic_visit(node)
 
@@ -79,12 +79,12 @@ def analyze_file(filepath: Path) -> Dict:
     """Analyze a Python file and return its structure."""
     source = filepath.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    
+
     analyzer = CodeAnalyzer()
     analyzer.visit(tree)
-    
+
     total_lines = source.count("\n") + 1
-    
+
     return {
         "filepath": str(filepath),
         "total_lines": total_lines,
@@ -101,14 +101,14 @@ def print_report(analysis: Dict) -> None:
     print(f"FILE ANALYSIS: {analysis['filepath']}")
     print(f"{'='*80}")
     print(f"Total lines: {analysis['total_lines']}")
-    
+
     # Imports
     print(f"\n--- IMPORTS ({len(analysis['imports']) + len(analysis['from_imports'])}) ---")
     for imp in analysis["imports"]:
         print(f"  import {imp}")
     for module, names in analysis["from_imports"]:
         print(f"  from {module} import {', '.join(names)}")
-    
+
     # Classes
     print(f"\n--- CLASSES ({len(analysis['classes'])}) ---")
     for cls in sorted(analysis["classes"], key=lambda x: -x["lines"]):
@@ -118,27 +118,27 @@ def print_report(analysis: Dict) -> None:
         print(f"    Methods ({len(cls['methods'])}):")
         for method in sorted(cls["methods"], key=lambda x: -x["lines"]):
             print(f"      - {method['name']}: {method['lines']} lines ({method['start_line']}-{method['end_line']})")
-    
+
     # Functions
     print(f"\n--- TOP-LEVEL FUNCTIONS ({len(analysis['functions'])}) ---")
     for fn in sorted(analysis["functions"], key=lambda x: -x["lines"]):
         print(f"  {fn['name']}: {fn['lines']} lines ({fn['start_line']}-{fn['end_line']})")
         if fn["args"]:
             print(f"    Args: {', '.join(fn['args'][:5])}{'...' if len(fn['args']) > 5 else ''}")
-    
+
     # Summary for refactoring
     print(f"\n--- REFACTORING SUMMARY ---")
     large_funcs = [f for f in analysis["functions"] if f["lines"] > 100]
     large_classes = [c for c in analysis["classes"] if c["lines"] > 200]
-    
+
     print(f"  Large functions (>100 lines): {len(large_funcs)}")
     for fn in large_funcs:
         print(f"    - {fn['name']}: {fn['lines']} lines")
-    
+
     print(f"  Large classes (>200 lines): {len(large_classes)}")
     for cls in large_classes:
         print(f"    - {cls['name']}: {cls['lines']} lines")
-    
+
     # Suggested modules
     print(f"\n--- SUGGESTED MODULE GROUPINGS ---")
     print("  constants.py: All *_AVOID_KEY_NAMES, *_LAYER_KEYNAMES constants")
@@ -163,11 +163,11 @@ def main():
             target = Path(__file__).parent / "convert_to_quant" / "convert_to_quant.py"
     else:
         target = Path(sys.argv[1])
-    
+
     if not target.exists():
         print(f"ERROR: File not found: {target}")
         sys.exit(1)
-    
+
     analysis = analyze_file(target)
     print_report(analysis)
 
