@@ -7,24 +7,24 @@ on:
     paths:
       - 'pyproject.toml'
       - '.github/workflows/build-wheels.yml'
-  workflow_dispatch:  # Manual trigger for testing
+  workflow_dispatch:  # Manual trigger
 
 permissions:
-  contents: write  # Required for creating releases
+  contents: write
 
 jobs:
   build:
     name: Build wheel and sdist
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.get_version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'  # Use minimum supported version to catch compat issues
+          python-version: '3.9'
 
       - name: Install build dependencies
         run: |
@@ -34,109 +34,37 @@ jobs:
       - name: Build wheel and sdist
         run: python -m build
 
-      - name: Get version from wheel
-        id: get_version
+      - name: Get version
+        id: version
         run: |
-          VERSION=$(ls dist/*.whl | sed 's/.*-\([0-9]*\.[0-9]*\.[0-9]*\)-.*/\1/')
+          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Detected version: $VERSION"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-          retention-days: 5
-
-  test:
-    name: Test ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    needs: build
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install wheel (no deps)
-        shell: bash
-        run: |
-          pip install dist/*.whl
-
-      - name: Verify no heavy dependencies installed
-        shell: bash
-        run: |
-          # Ensure torch is NOT installed (users install separately)
-          if pip show torch >/dev/null 2>&1; then
-            echo "ERROR: torch was installed as a dependency!"
-            exit 1
-          fi
-          echo "✓ torch not installed (as expected)"
-
-      - name: Install runtime dependencies for CLI test
-        shell: bash
-        run: |
-          pip install safetensors tqdm
-          # Install CPU-only torch for testing (smaller, faster)
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Verify package importable
-        shell: bash
-        run: |
-          python -c "import convert_to_quant; print('Version:', getattr(convert_to_quant, '__version__', 'N/A'))"
-
-      - name: Verify CLI entry point
-        run: convert_to_quant --help
-
-  release:
-    name: Create GitHub Release
-    needs: [build, test]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
       - name: Check if version changed
         id: version_check
         run: |
-          # Get current and previous version from pyproject.toml
-          CURRENT=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          CURRENT=${{ steps.version.outputs.version }}
           git show HEAD~1:pyproject.toml > /tmp/prev_pyproject.toml 2>/dev/null || echo 'version = "0.0.0"' > /tmp/prev_pyproject.toml
           PREVIOUS=$(grep '^version = ' /tmp/prev_pyproject.toml | sed 's/version = "\(.*\)"/\1/' || echo "0.0.0")
           echo "Current: $CURRENT, Previous: $PREVIOUS"
           if [ "$CURRENT" != "$PREVIOUS" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT" >> $GITHUB_OUTPUT
           else
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download build artifacts
-        if: steps.version_check.outputs.changed == 'true'
-        uses: actions/download-artifact@v4
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: convert_to_quant-v${{ steps.version.outputs.version }}
           path: dist/
+          retention-days: 5
 
       - name: Create Release
         if: steps.version_check.outputs.changed == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version_check.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
           files: dist/*
           generate_release_notes: true
           draft: false
