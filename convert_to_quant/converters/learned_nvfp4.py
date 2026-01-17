@@ -793,13 +793,13 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
     ) -> bool:
         """Check early stopping conditions."""
         if self.early_stop_loss > 0 and current_loss < self.early_stop_loss:
-            self.logger.debug("      - Loss is negligible. Stopping early.")
+            print("\n      - Loss is negligible. Stopping early.")
             return True
         if self.early_stop_lr > 0 and curr_lr < self.early_stop_lr:
-            self.logger.debug("      - Learning rate bottomed out. Stopping early.")
+            print("\n      - Learning rate bottomed out. Stopping early.")
             return True
         if self.early_stop_stall > 0 and worse_loss_counter >= self.early_stop_stall:
-            self.logger.debug("      - Loss has stalled. Stopping early.")
+            print("\n      - Loss has stalled. Stopping early.")
             return True
         return False
 
