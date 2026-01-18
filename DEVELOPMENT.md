@@ -1,5 +1,31 @@
 # Development Log
 
+## 2026-01-18: Metadata Preservation in Conversion Functions
+
+### Session Summary
+Added metadata preservation to all conversion functions. Previously, input file metadata was discarded during quantization, potentially breaking model usability if essential inference metadata was lost.
+
+---
+
+### Changes
+
+| File | Changes |
+|------|---------|
+| `utils/memory_efficient_loader.py` | Added `_metadata` field and `metadata()` method to expose input file metadata |
+| `formats/fp8_conversion.py` | Read original metadata via loader, merge with quant metadata on save |
+| `formats/nvfp4_conversion.py` | Read original metadata via loader, merge with quant metadata on save |
+| `formats/mxfp8_conversion.py` | Read original metadata via loader, merge with quant metadata on save |
+| `formats/int8_conversion.py` | Read original metadata via safe_open, merge with quant metadata on save |
+
+### Verification
+
+Tested with `test_model.safetensors` containing 3 metadata keys:
+- `license` (21,394 chars) - **preserved**
+- `encrypted_wandb_properties` (1,528 chars) - **preserved**
+- `config` (3,768 chars) - **preserved**
+
+---
+
 ## 2026-01-16: GitHub Actions Wheel Build Workflow
 
 ### Session Summary

@@ -88,3 +88,9 @@ comfy_quant = {
 ## 6. Implementation Constraints
 - ✅ **Safetensors only**: Primary format for serialization.
 - 📦 **Dependencies**: `safetensors`, `torch`, `tqdm`. Avoid adding heavy frameworks unless necessary.
+
+## 7. Testing Practices
+- **Script all tests**: Write Python scripts for verification rather than inline commands.
+- **convert_to_quant calls**: Always script CLI invocations with all relevant flag combinations.
+- **Comprehensive coverage**: Test all conversion paths (FP8, INT8, MXFP8, NVFP4, low-memory mode).
+- **Automate verification**: Include metadata checks, tensor counts, and format validation in test scripts.

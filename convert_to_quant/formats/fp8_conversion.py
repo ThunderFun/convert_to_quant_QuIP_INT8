@@ -115,6 +115,9 @@ def convert_to_fp8_scaled(
 
     all_keys = loader.keys()
 
+    # Read original file metadata to preserve during conversion
+    original_metadata = loader.metadata()
+
     # Initialize metadata collection if enabled
     quant_metadata_layers = {} if save_quant_metadata else None
 
@@ -718,16 +721,15 @@ def convert_to_fp8_scaled(
     try:
         os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
-        # Prepare metadata args
-        save_kwargs = {}
+        # Prepare metadata args - preserve original metadata and merge with quant metadata
+        output_metadata = dict(original_metadata)  # Start with original file metadata
         if save_quant_metadata and quant_metadata_layers:
             full_metadata = {"format_version": "1.0", "layers": quant_metadata_layers}
-            save_kwargs["metadata"] = {
-                "_quantization_metadata": json.dumps(full_metadata)
-            }
+            output_metadata["_quantization_metadata"] = json.dumps(full_metadata)
             print(
                 f"  Adding quantization metadata for {len(quant_metadata_layers)} layers"
             )
+        save_kwargs = {"metadata": output_metadata} if output_metadata else {}
 
         # Normalize any 1-element scale tensors to scalars
         new_tensors, normalized_count = normalize_tensorwise_scales(new_tensors, NORMALIZE_SCALES_ENABLED)

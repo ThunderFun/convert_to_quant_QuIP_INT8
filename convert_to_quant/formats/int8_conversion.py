@@ -46,10 +46,12 @@ def convert_int8_to_comfy_quant(
     info(f"Block size: {block_size}")
     info("-" * 60)
 
-    # Load input tensors
+    # Load input tensors and preserve original metadata
     tensors: Dict[str, torch.Tensor] = {}
+    original_metadata: Dict[str, str] = {}
     try:
         with safe_open(input_file, framework="pt", device="cpu") as f:
+            original_metadata = f.metadata() or {}
             minimal(f"Loading {len(f.keys())} tensors from source file...")
             for key in tqdm(f.keys(), desc="Loading tensors"):
                 tensors[key] = f.get_tensor(key)
@@ -316,11 +318,19 @@ def convert_int8_to_comfy_quant(
             os.path.dirname(output_file) if os.path.dirname(output_file) else ".",
             exist_ok=True,
         )
+        # Prepare metadata - preserve original and add quant metadata if enabled
+        output_metadata = dict(original_metadata)
+        if save_quant_metadata and quant_metadata_layers:
+            import json
+            full_metadata = {"format_version": "1.0", "layers": quant_metadata_layers}
+            output_metadata["_quantization_metadata"] = json.dumps(full_metadata)
+        save_kwargs = {"metadata": output_metadata} if output_metadata else {}
+
         # Normalize any 1-element scale tensors to scalars
         output_tensors, normalized_count = normalize_tensorwise_scales(output_tensors, NORMALIZE_SCALES_ENABLED)
         if normalized_count > 0:
             verbose(f"  Normalized {normalized_count} scale tensors to scalars")
-        save_file(output_tensors, output_file)
+        save_file(output_tensors, output_file, **save_kwargs)
 
         info("Conversion complete!")
     except Exception as e:

@@ -169,6 +169,9 @@ def convert_to_mxfp8(
 
     all_keys = loader.keys()
 
+    # Read original file metadata to preserve during conversion
+    original_metadata = loader.metadata()
+
     # Filter to only weight tensors for quantization
     weight_keys = sorted([
         k for k in all_keys
@@ -329,18 +332,18 @@ def convert_to_mxfp8(
         if normalized_count > 0:
             print(f"Normalized {normalized_count} scale tensors to scalars")
 
-    # Save output - always include quantization metadata for MXFP8
-    metadata_dict = {}
+    # Save output - preserve original metadata and include quantization metadata
+    output_metadata = dict(original_metadata)
     if quant_metadata:
         import json
         # Wrap in proper structure with format_version and layers (matching FP8/NVFP4)
         full_metadata = {"format_version": "1.0", "layers": quant_metadata}
-        metadata_dict["_quantization_metadata"] = json.dumps(full_metadata)
+        output_metadata["_quantization_metadata"] = json.dumps(full_metadata)
 
     print(f"\nSaving {len(output_tensors)} tensors to {output_file}")
 
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
-    save_file(output_tensors, output_file, metadata=metadata_dict if metadata_dict else None)
+    save_file(output_tensors, output_file, metadata=output_metadata if output_metadata else None)
 
     print("-" * 60)
     print("Summary:")

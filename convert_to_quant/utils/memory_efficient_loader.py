@@ -44,16 +44,20 @@ class UnifiedSafetensorsLoader:
         self._file = None
         self._header = None
         self._header_size = None
+        self._metadata: Dict[str, str] = {}
 
         if low_memory:
             # Streaming mode: read header only, keep file open
             self._header, self._header_size = self._read_header()
             self._file = open(filename, "rb")
             self._all_keys = [k for k in self._header.keys() if k != "__metadata__"]
+            # Extract metadata from header (safetensors stores it under __metadata__ key)
+            self._metadata = self._header.get("__metadata__", {})
             print(f"Low-memory mode: found {len(self._all_keys)} tensors (streaming)")
         else:
             # Standard mode: preload all tensors
             with safe_open(filename, framework="pt", device="cpu") as f:
+                self._metadata = f.metadata() or {}
                 self._all_keys = list(f.keys())
                 print(f"Loading {len(self._all_keys)} tensors from source file...")
                 from tqdm import tqdm
@@ -76,6 +80,10 @@ class UnifiedSafetensorsLoader:
     def keys(self):
         """Return list of all tensor keys."""
         return self._all_keys
+
+    def metadata(self) -> Dict[str, str]:
+        """Return file metadata."""
+        return self._metadata
 
     def get_shape(self, key: str) -> tuple:
         """Get tensor shape without loading tensor data.
