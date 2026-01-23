@@ -42,7 +42,7 @@ class BaseLearnedConverter(ABC):
         lr_schedule: str = "adaptive",
         lr_gamma: float = 0.99,
         lr_patience: int = 50,
-        lr_factor: float = 0.5,
+        lr_factor: float = 0.95,
         lr_min: float = 1e-8,
         lr_cooldown: int = 0,
         lr_threshold: float = 0.0,
@@ -225,7 +225,8 @@ class BaseLearnedConverter(ABC):
 
             # Decay range: shape-aware
             # More skewed tensors = slightly stronger decay at midpoint
-            min_decay = 0.95 - 0.03 * shape_ratio  # e.g., 0.92 for very skewed
+            # Uses self.lr_factor as base (default 0.95)
+            min_decay = self.lr_factor - 0.03 * shape_ratio
             max_decay = 0.995
 
             decay_mult = min_decay + (max_decay - min_decay) * u_factor
