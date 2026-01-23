@@ -627,8 +627,10 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
                     block_scales_float.clamp_(min=1e-6, max=F8_E4M3_MAX)
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 best_total_scale = current_total_scale.detach().clone()
@@ -762,8 +764,10 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
                     block_scales_float.clamp_(min=1e-6, max=F8_E4M3_MAX)
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 best_total_scale = current_total_scale.detach().clone()

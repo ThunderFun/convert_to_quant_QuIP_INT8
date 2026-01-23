@@ -581,8 +581,10 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
             optimizer.step()
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 best_block_scales_f32 = current_block_scales_f32.clone()
@@ -730,8 +732,10 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
             optimizer.step()
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 best_block_scales_f32 = current_block_scales_f32.clone()

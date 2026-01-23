@@ -121,8 +121,10 @@ class LearnedRoundingConverter(BaseLearnedConverter):
             optimizer.step()
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 worse_loss_counter = 0
@@ -245,8 +247,10 @@ class LearnedRoundingConverter(BaseLearnedConverter):
             optimizer.step()
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 worse_loss_counter = 0
@@ -742,8 +746,10 @@ class LearnedRoundingConverter(BaseLearnedConverter):
             optimizer.step()
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 worse_loss_counter = 0
@@ -863,8 +869,10 @@ class LearnedRoundingConverter(BaseLearnedConverter):
             optimizer.step()
 
             current_loss_val = loss.item()
+            prev_worse_counter = worse_loss_counter
+            improved = self._check_improvement(current_loss_val, best_loss)
 
-            if current_loss_val < best_loss:
+            if improved:
                 best_loss = current_loss_val
                 best_delta = delta.detach().clone()
                 worse_loss_counter = 0
