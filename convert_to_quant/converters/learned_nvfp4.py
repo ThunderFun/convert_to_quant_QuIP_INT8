@@ -515,7 +515,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
                 "loss": f"{current_loss:.3e}",
                 "best": f"{best_loss:.3e}",
                 "lr": f"{curr_lr:.2e}",
-                "worse": f"{worse_loss_counter}",
+                "worse_count": f"{worse_loss_counter}",
             })
 
             # Early stopping
@@ -673,11 +673,20 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
                 if improved and self.lr_adaptive_mode == "no-reset":
                     worse_loss_counter = 0
 
-            pbar.set_postfix({
-                "loss": f"{current_loss_val:.3e}",
-                "best": f"{best_loss:.3e}",
-                "lr": f"{curr_lr:.2e}",
-            })
+            if schedule_name == "plateau":
+                pbar.set_postfix({
+                    "loss": f"{current_loss_val:.3e}",
+                    "best": f"{best_loss:.3e}",
+                    "lr": f"{curr_lr:.2e}",
+                    "plateau": f"{plateau_counter}/{effective_patience}",
+                })
+            else:
+                pbar.set_postfix({
+                    "loss": f"{current_loss_val:.3e}",
+                    "best": f"{best_loss:.3e}",
+                    "lr": f"{curr_lr:.2e}",
+                    "worse_count": f"{worse_loss_counter}",
+                })
 
             if self._check_early_stop(best_loss, curr_lr, worse_loss_counter):
                 break
@@ -810,11 +819,20 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
                 if improved and self.lr_adaptive_mode == "no-reset":
                     worse_loss_counter = 0
 
-            pbar.set_postfix({
-                "loss": f"{current_loss_val:.3e}",
-                "best": f"{best_loss:.3e}",
-                "lr": f"{curr_lr:.2e}",
-            })
+            if schedule_name == "plateau":
+                pbar.set_postfix({
+                    "loss": f"{current_loss_val:.3e}",
+                    "best": f"{best_loss:.3e}",
+                    "lr": f"{curr_lr:.2e}",
+                    "plateau": f"{plateau_counter}/{effective_patience}",
+                })
+            else:
+                pbar.set_postfix({
+                    "loss": f"{current_loss_val:.3e}",
+                    "best": f"{best_loss:.3e}",
+                    "lr": f"{curr_lr:.2e}",
+                    "worse_count": f"{worse_loss_counter}",
+                })
 
             if self._check_early_stop(best_loss, curr_lr, worse_loss_counter):
                 break
