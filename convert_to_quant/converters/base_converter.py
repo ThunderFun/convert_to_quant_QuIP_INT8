@@ -162,8 +162,8 @@ class BaseLearnedConverter(ABC):
         """
         Cosine-based adaptive LR update with shape-awareness.
 
-        Uses a U-shaped cosine curve for decay that is:
-        - Gentle at start (multiplier close to 1.0)
+        Uses a U-shaped cosine curve for both boost and decay that is:
+        - Gentle at start of stall (multiplier close to 1.0)
         - Most aggressive at midpoint of early_stop_stall
         - Gentle again near end to prevent bottoming out too early
 
@@ -188,7 +188,7 @@ class BaseLearnedConverter(ABC):
         Args:
             curr_lr: Current learning rate
             improved: Whether loss improved this iteration
-            worse_loss_counter: Steps since last improvement
+            worse_loss_counter: Steps since last improvement (BEFORE reset if improved)
             iteration: Current optimization iteration
             tensor_shape: (M, N) dimensions of weight tensor
             min_lr: Minimum allowed learning rate
@@ -199,13 +199,22 @@ class BaseLearnedConverter(ABC):
         M, N = tensor_shape
         shape_ratio = abs(M - N) / max(M, N)  # 0 for square, ~1 for very skewed
 
+        # Cosine U-curve: gentle at start/end of stall, aggressive at midpoint
+        t = min(worse_loss_counter / max(self.early_stop_stall, 1), 1.0)
+        u_factor = (1 + math.cos(2 * math.pi * t)) / 2
+
         if improved:
             # Boost: scale distance from 1.0 by shape factor
             # More skewed tensors get slightly stronger boost
             base_boost = 1.25
             distance = base_boost - 1.0
             scaled_distance = distance * (1.0 + 0.5 * shape_ratio)
-            boost_mult = 1.0 + scaled_distance
+
+            # Aggressiveness: gentle at start of stall (u_factor near 1.0)
+            # Most aggressive at midpoint (u_factor near 0.0)
+            # This prevents compounding boosts when already improving rapidly.
+            boost_mult = 1.0 + scaled_distance * (1.0 - u_factor)
+
             new_lr = min(curr_lr * boost_mult, 100.0)
             return new_lr, True
         else:
@@ -213,10 +222,6 @@ class BaseLearnedConverter(ABC):
             cooldown = max(self.lr_cooldown, 1)
             if iteration % cooldown != 0:
                 return curr_lr, False
-
-            # Cosine U-curve: gentle at start/end, aggressive at midpoint
-            t = min(worse_loss_counter / max(self.early_stop_stall, 1), 1.0)
-            u_factor = (1 + math.cos(2 * math.pi * t)) / 2
 
             # Decay range: shape-aware
             # More skewed tensors = slightly stronger decay at midpoint

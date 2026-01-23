@@ -60,6 +60,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
         pad_to_16x: bool = True,
         scale_refinement_rounds: int = 1,
         scale_optimization: str = "fixed",
+        lr: float = 8.077300000003e-3,
         **kwargs,
     ):
         """
@@ -82,7 +83,7 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
         if scale_optimization not in valid_scale_modes:
             raise ValueError(f"scale_optimization must be one of {valid_scale_modes}, got '{scale_optimization}'")
 
-        super().__init__(**kwargs)
+        super().__init__(lr=lr, **kwargs)
 
         self.block_size = block_size
         self.pad_to_16x = pad_to_16x
@@ -497,8 +498,10 @@ class LearnedNVFP4Converter(BaseLearnedConverter):
                         cooldown_counter = effective_cooldown
                     plateau_counter = 0
             else:  # 'adaptive' - tier-based schedule
+                # Use counter before reset for boost calculation to prevent compounding
+                counter_for_update = prev_worse_counter if improved else worse_loss_counter
                 new_lr, lr_updated = self._adaptive_lr_update_cosine(
-                    curr_lr, improved, worse_loss_counter, i,
+                    curr_lr, improved, counter_for_update, i,
                     (M, N), self.early_stop_lr
                 )
                 if lr_updated:

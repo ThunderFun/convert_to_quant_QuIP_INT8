@@ -37,6 +37,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         scaling_mode: str = "tensor",
         block_size: int = 64,
         target_format: str = "fp8",
+        lr: float = 8.077300000003e-3,
         **kwargs,
     ):
         """
@@ -48,7 +49,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
             target_format: Target format ("fp8" or "int8")
             **kwargs: All other args passed to BaseLearnedConverter
         """
-        super().__init__(**kwargs)
+        super().__init__(lr=lr, **kwargs)
 
         self.block_size = block_size
         self.target_format = target_format
@@ -409,8 +410,10 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                     if plateau_counter > 0:
                          debug(f"      [LR] Waiting: {plateau_counter}/{effective_patience} (Loss: {current_loss:.3e})")
             else:  # 'adaptive' - cosine-based schedule
+                # Use counter before reset for boost calculation to prevent compounding
+                counter_for_update = prev_worse_counter if improved else worse_loss_counter
                 new_lr, lr_updated = self._adaptive_lr_update_cosine(
-                    curr_lr, improved, worse_loss_counter, i,
+                    curr_lr, improved, counter_for_update, i,
                     (M, N), self.early_stop_lr
                 )
                 if lr_updated:
@@ -988,8 +991,10 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                         cooldown_counter = effective_cooldown
                     plateau_counter = 0
             else:  # 'adaptive' - cosine-based schedule
+                # Use counter before reset for boost calculation to prevent compounding
+                counter_for_update = prev_worse_counter if improved else worse_loss_counter
                 new_lr, lr_updated = self._adaptive_lr_update_cosine(
-                    curr_lr, improved, worse_loss_counter, i,
+                    curr_lr, improved, counter_for_update, i,
                     (M, N), self.early_stop_lr
                 )
                 if lr_updated:
