@@ -13,7 +13,6 @@ from typing import Tuple, Optional
 import torch
 
 from ..constants import COMPUTE_DTYPE, SCALE_DTYPE
-from ..utils.tensor_utils import adaptive_lr_update
 from ..pinned_transfer import transfer_to_gpu_pinned
 
 
@@ -149,32 +148,82 @@ class BaseLearnedConverter(ABC):
 
         return U[:, :k], Vh[:k, :], k
 
-    def _adaptive_lr_update(
+    def _adaptive_lr_update_cosine(
         self,
         curr_lr: float,
         improved: bool,
-        counter_for_tier: int,
         worse_loss_counter: int,
-        small_mult: float = 1.0,
-    ) -> float:
+        iteration: int,
+        tensor_shape: Tuple[int, int],
+        min_lr: float = 1e-10,
+    ) -> Tuple[float, bool]:
         """
-        Tier-based adaptive LR update schedule.
+        Cosine-based adaptive LR update with shape-awareness.
 
-        Delegates to centralized adaptive_lr_update() from tensor_utils.
+        Uses a U-shaped cosine curve for decay that is:
+        - Gentle at start (multiplier close to 1.0)
+        - Most aggressive at midpoint of early_stop_stall
+        - Gentle again near end to prevent bottoming out too early
+
+        Decay is only applied every `lr_cooldown` steps to prevent
+        compounding too rapidly over thousands of iterations.
+
+        IMPLEMENTATION LOCATIONS:
+        This method should be called from the adaptive LR branch in:
+        - learned_rounding.py: _optimize_original() ~line 417
+        - learned_rounding.py: _optimize_int8_original() ~line 1020
+        - learned_mxfp8.py: _optimize_original() ~line 430
+        - learned_nvfp4.py: _optimize_original() ~line 490
+
+        Replace the existing tier-based if/elif chain with:
+            new_lr, lr_updated = self._adaptive_lr_update_cosine(
+                curr_lr, improved, worse_loss_counter, iteration,
+                (M, N), self.early_stop_lr
+            )
+            if lr_updated:
+                curr_lr = new_lr
 
         Args:
             curr_lr: Current learning rate
             improved: Whether loss improved this iteration
-            counter_for_tier: Counter for tier selection
-            worse_loss_counter: Current worse loss counter
-            small_mult: Optional multiplier for square matrices
+            worse_loss_counter: Steps since last improvement
+            iteration: Current optimization iteration
+            tensor_shape: (M, N) dimensions of weight tensor
+            min_lr: Minimum allowed learning rate
 
         Returns:
-            Updated learning rate
+            Tuple of (new_lr, lr_was_updated)
         """
-        return adaptive_lr_update(
-            curr_lr, improved, counter_for_tier, worse_loss_counter, small_mult
-        )
+        M, N = tensor_shape
+        shape_ratio = abs(M - N) / max(M, N)  # 0 for square, ~1 for very skewed
+
+        if improved:
+            # Boost: scale distance from 1.0 by shape factor
+            # More skewed tensors get slightly stronger boost
+            base_boost = 1.25
+            distance = base_boost - 1.0
+            scaled_distance = distance * (1.0 + 0.5 * shape_ratio)
+            boost_mult = 1.0 + scaled_distance
+            new_lr = min(curr_lr * boost_mult, 100.0)
+            return new_lr, True
+        else:
+            # Decay: only update every lr_cooldown steps
+            cooldown = max(self.lr_cooldown, 1)
+            if iteration % cooldown != 0:
+                return curr_lr, False
+
+            # Cosine U-curve: gentle at start/end, aggressive at midpoint
+            t = min(worse_loss_counter / max(self.early_stop_stall, 1), 1.0)
+            u_factor = (1 + math.cos(2 * math.pi * t)) / 2
+
+            # Decay range: shape-aware
+            # More skewed tensors = slightly stronger decay at midpoint
+            min_decay = 0.95 - 0.03 * shape_ratio  # e.g., 0.92 for very skewed
+            max_decay = 0.995
+
+            decay_mult = min_decay + (max_decay - min_decay) * u_factor
+            new_lr = max(curr_lr * decay_mult, min_lr)
+            return new_lr, True
 
     def _compute_shape_aware_plateau_params(
         self, M: int, N: int
