@@ -410,7 +410,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                          debug(f"      [LR] Waiting: {plateau_counter}/{effective_patience} (Loss: {current_loss:.3e})")
             else:  # 'adaptive' - cosine-based schedule
                 new_lr, lr_updated = self._adaptive_lr_update_cosine(
-                    curr_lr, improved, worse_loss_counter, iteration,
+                    curr_lr, improved, worse_loss_counter, i,
                     (M, N), self.early_stop_lr
                 )
                 if lr_updated:
@@ -989,7 +989,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                     plateau_counter = 0
             else:  # 'adaptive' - cosine-based schedule
                 new_lr, lr_updated = self._adaptive_lr_update_cosine(
-                    curr_lr, improved, worse_loss_counter, iteration,
+                    curr_lr, improved, worse_loss_counter, i,
                     (M, N), self.early_stop_lr
                 )
                 if lr_updated:
