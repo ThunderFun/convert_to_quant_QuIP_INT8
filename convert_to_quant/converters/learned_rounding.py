@@ -102,6 +102,13 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         plateau_counter = 0
         cooldown_counter = 0
 
+        # Shape-aware plateau parameters
+        effective_patience, effective_factor, effective_cooldown = (
+            self._compute_shape_aware_plateau_params(
+                W_float32.shape[0], W_float32.shape[1]
+            )
+        )
+
         pbar = tqdm(
             range(self.num_iter),
             desc=f"    Optimizing (AdamW-{schedule_name})",
@@ -142,19 +149,19 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                 if cooldown_counter > 0:
                     cooldown_counter -= 1
                     debug(f"      [LR] Cooldown: {cooldown_counter} left")
-                elif plateau_counter >= self.lr_patience:
-                    debug(f"      [LR] Plateau {plateau_counter}/{self.lr_patience} reached. Decaying.")
+                elif plateau_counter >= effective_patience:
+                    debug(f"      [LR] Plateau {plateau_counter}/{effective_patience} reached. Decaying.")
                     if curr_lr > self.lr_min:
                         old_lr = curr_lr
-                        curr_lr = max(curr_lr * self.lr_factor, self.lr_min)
+                        curr_lr = max(curr_lr * effective_factor, self.lr_min)
                         for param_group in optimizer.param_groups:
                             param_group["lr"] = curr_lr
-                        cooldown_counter = self.lr_cooldown
-                        debug(f"      [LR] Decay: {old_lr:.2e} -> {curr_lr:.2e} (Factor: {self.lr_factor:.4f})")
+                        cooldown_counter = effective_cooldown
+                        debug(f"      [LR] Decay: {old_lr:.2e} -> {curr_lr:.2e} (Factor: {effective_factor:.4f})")
                     plateau_counter = 0
                 else:
                     if plateau_counter > 0:
-                         debug(f"      [LR] Waiting: {plateau_counter}/{self.lr_patience} (Loss: {current_loss_val:.3e})")
+                         debug(f"      [LR] Waiting: {plateau_counter}/{effective_patience} (Loss: {current_loss_val:.3e})")
             else:  # 'adaptive' - cosine-based schedule
                 # Use counter before reset for boost calculation to prevent compounding
                 counter_for_update = prev_worse_counter if improved else worse_loss_counter
@@ -178,7 +185,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                         "loss": f"{current_loss_val:.3e}",
                         "best": f"{best_loss:.3e}",
                         "lr": f"{curr_lr:.2e}",
-                        "plateau": f"{plateau_counter}/{self.lr_patience}",
+                        "plateau": f"{plateau_counter}/{effective_patience}",
                     }
                 )
             else:
@@ -228,6 +235,13 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         plateau_counter = 0
         cooldown_counter = 0
 
+        # Shape-aware plateau parameters
+        effective_patience, effective_factor, effective_cooldown = (
+            self._compute_shape_aware_plateau_params(
+                W_float32.shape[0], W_float32.shape[1]
+            )
+        )
+
         pbar = tqdm(
             range(self.num_iter),
             desc=f"    Optimizing (RAdam-{schedule_name})",
@@ -268,19 +282,19 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                 if cooldown_counter > 0:
                     cooldown_counter -= 1
                     debug(f"      [LR] Cooldown: {cooldown_counter} left")
-                elif plateau_counter >= self.lr_patience:
-                    debug(f"      [LR] Plateau {plateau_counter}/{self.lr_patience} reached. Decaying.")
+                elif plateau_counter >= effective_patience:
+                    debug(f"      [LR] Plateau {plateau_counter}/{effective_patience} reached. Decaying.")
                     if curr_lr > self.lr_min:
                         old_lr = curr_lr
-                        curr_lr = max(curr_lr * self.lr_factor, self.lr_min)
+                        curr_lr = max(curr_lr * effective_factor, self.lr_min)
                         for param_group in optimizer.param_groups:
                             param_group["lr"] = curr_lr
-                        cooldown_counter = self.lr_cooldown
-                        debug(f"      [LR] Decay: {old_lr:.2e} -> {curr_lr:.2e} (Factor: {self.lr_factor:.4f})")
+                        cooldown_counter = effective_cooldown
+                        debug(f"      [LR] Decay: {old_lr:.2e} -> {curr_lr:.2e} (Factor: {effective_factor:.4f})")
                     plateau_counter = 0
                 else:
                     if plateau_counter > 0:
-                         debug(f"      [LR] Waiting: {plateau_counter}/{self.lr_patience} (Loss: {current_loss_val:.3e})")
+                         debug(f"      [LR] Waiting: {plateau_counter}/{effective_patience} (Loss: {current_loss_val:.3e})")
             else:  # 'adaptive' - cosine-based schedule
                 # Use counter before reset for boost calculation to prevent compounding
                 counter_for_update = prev_worse_counter if improved else worse_loss_counter
@@ -304,7 +318,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                         "loss": f"{current_loss_val:.3e}",
                         "best": f"{best_loss:.3e}",
                         "lr": f"{curr_lr:.2e}",
-                        "plateau": f"{plateau_counter}/{self.lr_patience}",
+                        "plateau": f"{plateau_counter}/{effective_patience}",
                     }
                 )
             else:
