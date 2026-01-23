@@ -177,15 +177,15 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
             # Early stopping conditions
             if (
-                best_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                best_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
-                if curr_lr < self.early_stop_lr:
+                if curr_lr <= self.early_stop_lr:
                     print("\n      - Learning rate bottomed out. Stopping early.")
                 elif worse_loss_counter > self.early_stop_stall:
                     print("\n      - Loss has stalled. Stopping early.")
-                elif best_loss < self.early_stop_loss:
+                elif best_loss <= self.early_stop_loss:
                     print("\n      - Loss is negligible. Stopping early.")
                 break
 
@@ -287,15 +287,15 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
             # Early stopping conditions
             if (
-                best_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                best_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
-                if curr_lr < self.early_stop_lr:
+                if curr_lr <= self.early_stop_lr:
                     print("\n      - Learning rate bottomed out. Stopping early.")
                 elif worse_loss_counter > self.early_stop_stall:
                     print("\n      - Loss has stalled. Stopping early.")
-                elif best_loss < self.early_stop_loss:
+                elif best_loss <= self.early_stop_loss:
                     print("\n      - Loss is negligible. Stopping early.")
                 break
 
@@ -445,18 +445,18 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
             # Early stopping conditions (configurable thresholds)
             if (
-                current_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                current_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
                 if (
-                    curr_lr < self.early_stop_lr * 1.75
+                    curr_lr <= self.early_stop_lr * 1.75
                     and worse_loss_counter > self.early_stop_stall * 0.95
                 ):
                     print("\n      - Loss has stalled and learning rate has bottomed out. Stopping.")
                 elif (
-                    current_loss < self.early_stop_loss
-                    and curr_lr < self.early_stop_lr * 1.75
+                    current_loss <= self.early_stop_loss
+                    and curr_lr <= self.early_stop_lr * 1.75
                 ):
                     print("\n      - Learning Rate has bottomed out and loss is negligible. Stopping.")
                 elif (
@@ -464,9 +464,9 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                     and current_loss > self.early_stop_loss * 2
                 ):
                     print("\n      - Loss is negligible and loss has stalled. Stopping.")
-                elif current_loss < self.early_stop_loss:
+                elif current_loss <= self.early_stop_loss:
                     print("\n      - Loss is negligible. Stopping.")
-                elif curr_lr < self.early_stop_lr:
+                elif curr_lr <= self.early_stop_lr:
                     print("\n      - Learning Rate has bottomed out. Stopping.")
                 elif worse_loss_counter > self.early_stop_stall:
                     print("\n      - Loss has stalled. Stopping.")
@@ -751,15 +751,15 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
             # Early stopping conditions
             if (
-                best_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                best_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
-                if curr_lr < self.early_stop_lr:
+                if curr_lr <= self.early_stop_lr:
                     print("\n      - Learning rate bottomed out. Stopping early.")
                 elif worse_loss_counter > self.early_stop_stall:
                     print("\n      - Loss has stalled. Stopping early.")
-                elif best_loss < self.early_stop_loss:
+                elif best_loss <= self.early_stop_loss:
                     print("\n      - Loss is negligible. Stopping early.")
                 break
 
@@ -858,15 +858,15 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
             # Early stopping conditions
             if (
-                best_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                best_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
-                if curr_lr < self.early_stop_lr:
+                if curr_lr <= self.early_stop_lr:
                     print("\n      - Learning rate bottomed out. Stopping early.")
                 elif worse_loss_counter > self.early_stop_stall:
                     print("\n      - Loss has stalled. Stopping early.")
-                elif best_loss < self.early_stop_loss:
+                elif best_loss <= self.early_stop_loss:
                     print("\n      - Loss is negligible. Stopping early.")
                 break
 
@@ -1015,18 +1015,18 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
             # Early stopping conditions (configurable thresholds)
             if (
-                current_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                current_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
                 if (
-                    curr_lr < self.early_stop_lr * 1.75
+                    curr_lr <= self.early_stop_lr * 1.75
                     and worse_loss_counter > self.early_stop_stall * 0.95
                 ):
                     print("\n      - Loss has stalled and learning rate has bottomed out. Stopping.")
                 elif (
-                    current_loss < self.early_stop_loss
-                    and curr_lr < self.early_stop_lr * 1.75
+                    current_loss <= self.early_stop_loss
+                    and curr_lr <= self.early_stop_lr * 1.75
                 ):
                     print(
                         "      - Learning Rate has bottomed out and loss is negligible. Stopping."
@@ -1036,9 +1036,9 @@ class LearnedRoundingConverter(BaseLearnedConverter):
                     and current_loss > self.early_stop_loss * 2
                 ):
                     print("\n      - Loss is negligible and loss has stalled. Stopping.")
-                elif current_loss < self.early_stop_loss:
+                elif current_loss <= self.early_stop_loss:
                     print("\n      - Loss is negligible. Stopping.")
-                elif curr_lr < self.early_stop_lr:
+                elif curr_lr <= self.early_stop_lr:
                     print("\n      - Learning Rate has bottomed out. Stopping.")
                 elif worse_loss_counter > self.early_stop_stall:
                     print("\n      - Loss has stalled. Stopping.")
