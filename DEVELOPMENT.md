@@ -1,4 +1,14 @@
 
+## 2026-01-24: Formats Documentation
+
+### Session Summary
+Created comprehensive technical documentation for all supported quantization formats in `docs/FORMATS.md`. This guide details the internal mechanics of FP8, INT8, NVFP4, and MXFP8 formats, including scaling strategies, SVD-based learned rounding optimization, bias correction techniques, and hardware requirements, strictly based on the implementation in the codebase.
+
+### Files Created
+- `docs/FORMATS.md`: Comprehensive guide to quantization formats.
+
+---
+
 ## 2026-01-23: Tensor-wise INT8 Quantization Support
 
 ### Session Summary
