@@ -474,18 +474,18 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
 
             # Early stopping conditions (explicit match to learned_rounding.py)
             if (
-                current_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                current_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
                 if (
-                    curr_lr < self.early_stop_lr * 1.75
+                    curr_lr <= self.early_stop_lr * 1.75
                     and worse_loss_counter > self.early_stop_stall * 0.95
                 ):
                     info("\n      - Loss has stalled and learning rate has bottomed out. Stopping.")
                 elif (
-                    current_loss < self.early_stop_loss
-                    and curr_lr < self.early_stop_lr * 1.75
+                    current_loss <= self.early_stop_loss
+                    and curr_lr <= self.early_stop_lr * 1.75
                 ):
                     info("\n      - Learning Rate has bottomed out and loss is negligible. Stopping.")
                 elif (
@@ -493,9 +493,9 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
                     and current_loss > self.early_stop_loss * 2
                 ):
                     info("\n      - Loss is negligible and loss has stalled. Stopping.")
-                elif current_loss < self.early_stop_loss:
+                elif current_loss <= self.early_stop_loss:
                     info("\n      - Loss is negligible. Stopping.")
-                elif curr_lr < self.early_stop_lr:
+                elif curr_lr <= self.early_stop_lr:
                     info("\n      - Learning Rate has bottomed out. Stopping.")
                 elif worse_loss_counter > self.early_stop_stall:
                     info("\n      - Loss has stalled. Stopping.")
@@ -658,15 +658,15 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
 
             # Early stopping conditions
             if (
-                best_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                best_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
-                if curr_lr < self.early_stop_lr:
+                if curr_lr <= self.early_stop_lr:
                     info("\n      - Learning rate bottomed out. Stopping early.")
                 elif worse_loss_counter > self.early_stop_stall:
                     info("\n      - Loss has stalled. Stopping early.")
-                elif best_loss < self.early_stop_loss:
+                elif best_loss <= self.early_stop_loss:
                     info("\n      - Loss is negligible. Stopping early.")
                 break
 
@@ -814,15 +814,15 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
 
             # Early stopping conditions
             if (
-                best_loss < self.early_stop_loss
-                or curr_lr < self.early_stop_lr
+                best_loss <= self.early_stop_loss
+                or curr_lr <= self.early_stop_lr
                 or worse_loss_counter > self.early_stop_stall
             ):
-                if curr_lr < self.early_stop_lr:
+                if curr_lr <= self.early_stop_lr:
                     info("\n      - Learning rate bottomed out. Stopping early.")
                 elif worse_loss_counter > self.early_stop_stall:
                     info("\n      - Loss has stalled. Stopping early.")
-                elif best_loss < self.early_stop_loss:
+                elif best_loss <= self.early_stop_loss:
                     info("\n      - Loss is negligible. Stopping early.")
                 break
 
