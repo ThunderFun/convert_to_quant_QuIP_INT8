@@ -835,7 +835,7 @@ class BlockWiseINT8Layout(QuantizedLayout):
 
         # Clamp and convert to int8
         tensor_scaled = torch.clamp(tensor_scaled, -127.0, 127.0)
-        qdata = tensor_scaled.to(torch.int8)
+        qdata = tensor_scaled.round().to(torch.int8)
 
         # Reshape back to original shape
         qdata = qdata.permute(0, 2, 1, 3).reshape(M, N)
@@ -862,7 +862,7 @@ class BlockWiseINT8Layout(QuantizedLayout):
 
         # Clamp and convert to int8
         tensor_scaled = torch.clamp(tensor_scaled, -127.0, 127.0)
-        qdata = tensor_scaled.to(torch.int8)
+        qdata = tensor_scaled.round().to(torch.int8)
 
         # Reshape back to original shape
         qdata = qdata.reshape(tensor.shape)
@@ -1031,7 +1031,7 @@ class TensorWiseINT8Layout(QuantizedLayout):
 
         # Clamp and convert to int8
         tensor_scaled = torch.clamp(tensor_scaled, -127.0, 127.0)
-        qdata = tensor_scaled.to(torch.int8)
+        qdata = tensor_scaled.round().to(torch.int8)
 
         # Store dequant scale (reciprocal of quant scale)
         dequant_scale = 1.0 / quant_scale
