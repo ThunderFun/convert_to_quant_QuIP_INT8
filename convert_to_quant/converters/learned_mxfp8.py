@@ -338,6 +338,8 @@ class LearnedMXFP8Converter(BaseLearnedConverter):
         tensor_blocks = W_float32.reshape(M, num_blocks, self.block_size)
         W_q_initial = tensor_blocks / block_scales_f32.unsqueeze(-1)
         W_q_initial = torch.clamp(W_q_initial, -self.fp8_max, self.fp8_max)
+        # Snap to FP8 grid to ensure non-zero initial loss
+        W_q_initial = W_q_initial.to(MXFP8_DTYPE).float()
         W_q_refined = W_q_initial.view(M, N).clone()
 
         current_block_scales_f32 = block_scales_f32.clone()
