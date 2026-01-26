@@ -66,12 +66,24 @@ def fast_hadamard_transform(x: Tensor, normalize: bool = True, inplace: bool = F
             pass
 
     original_shape = x.shape
+    
+    # DIAGNOSTIC: Log input tensor info and memory before transform
+    import os
+    _oom_diag = os.environ.get("QUIP_OOM_DIAG", "0") == "1"
+    if _oom_diag:
+        tensor_mb = x.numel() * x.element_size() / (1024 * 1024)
+        print(f"      [OOM-DIAG] Hadamard input: shape={x.shape}, dtype={x.dtype}, device={x.device}, size={tensor_mb:.1f}MB")
+        if x.is_cuda:
+            gpu_alloc = torch.cuda.memory_allocated() / (1024**3)
+            print(f"      [OOM-DIAG] GPU before Hadamard loop: {gpu_alloc:.2f}GB allocated")
+    
     if not inplace:
         x = x.clone()
     
     x = x.reshape(-1, n)
     
     h = 1
+    iterations = 0
     while h < n:
         x = x.view(-1, n // (h * 2), 2, h)
         # Butterfly operation: [a, b] -> [a+b, a-b]
@@ -81,10 +93,19 @@ def fast_hadamard_transform(x: Tensor, normalize: bool = True, inplace: bool = F
         # but we can avoid the initial clone if inplace=True
         x = torch.stack([a + b, a - b], dim=2)
         h *= 2
+        iterations += 1
+        
+        # DIAGNOSTIC: Log memory after each iteration (only first few)
+        if _oom_diag and iterations <= 3 and x.is_cuda:
+            gpu_alloc = torch.cuda.memory_allocated() / (1024**3)
+            print(f"      [OOM-DIAG] Hadamard iter {iterations}: h={h}, GPU={gpu_alloc:.2f}GB")
     
     x = x.reshape(original_shape)
     if normalize:
         x = x / math.sqrt(n)
+    
+    if _oom_diag:
+        print(f"      [OOM-DIAG] Hadamard complete: {iterations} iterations")
         
     return x
 

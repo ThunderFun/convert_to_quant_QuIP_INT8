@@ -60,14 +60,15 @@ class QuIPInt8Converter:
         self._err_buffer = None
         self._q_buffer = None
 
-    def _ensure_buffers(self, M: int, N: int, block_size: int) -> None:
+    def _ensure_buffers(self, M: int, N: int, block_size: int, ldlq_device: str = None) -> None:
         """Allocate or reuse buffers for quantization loop."""
-        if self._q_buffer is None or self._q_buffer.shape[0] != M or self._q_buffer.shape[1] != block_size:
-            self._q_buffer = torch.empty(M, block_size, dtype=torch.int8, device=self.device)
-            self._err_buffer = torch.empty(M, block_size, dtype=torch.float32, device=self.device)
+        buf_device = ldlq_device if ldlq_device else self.device
+        if self._q_buffer is None or self._q_buffer.shape[0] != M or self._q_buffer.shape[1] != block_size or self._q_buffer.device.type != buf_device:
+            self._q_buffer = torch.empty(M, block_size, dtype=torch.int8, device=buf_device)
+            self._err_buffer = torch.empty(M, block_size, dtype=torch.float32, device=buf_device)
             
-        if self._W_buffer is None or self._W_buffer.shape != (M, N):
-            self._W_buffer = torch.empty(M, N, dtype=torch.float32, device=self.device)
+        if self._W_buffer is None or self._W_buffer.shape != (M, N) or self._W_buffer.device.type != buf_device:
+            self._W_buffer = torch.empty(M, N, dtype=torch.float32, device=buf_device)
 
     def _get_random_signs(self, n: int) -> Tensor:
         """Get random signs (+1/-1) for QuIP. Does NOT reset seed - that's done once in __init__."""
@@ -140,6 +141,19 @@ class QuIPInt8Converter:
             from ..utils.hadamard import next_power_of_two
             M_pad = next_power_of_two(M)
             N_pad = next_power_of_two(N)
+            
+            # DIAGNOSTIC: Log padding expansion and memory impact
+            import torch
+            padding_factor = (M_pad * N_pad) / (M * N)
+            W_mem_mb = (M_pad * N_pad * 4) / (1024 * 1024)  # float32
+            H_mem_mb = (N_pad * N_pad * 4) / (1024 * 1024)  # float32
+            debug(f"      [OOM-DIAG] W shape: {M}x{N} -> padded: {M_pad}x{N_pad} (factor: {padding_factor:.2f}x)")
+            debug(f"      [OOM-DIAG] Estimated memory: W_padded={W_mem_mb:.1f}MB, H_padded={H_mem_mb:.1f}MB")
+            debug(f"      [OOM-DIAG] low_memory={self.low_memory}, device={self.device}")
+            if torch.cuda.is_available():
+                gpu_mem = torch.cuda.memory_allocated() / (1024**3)
+                gpu_reserved = torch.cuda.memory_reserved() / (1024**3)
+                debug(f"      [OOM-DIAG] GPU memory: allocated={gpu_mem:.2f}GB, reserved={gpu_reserved:.2f}GB")
             
             # Use CPU for large matrices if in low_memory mode
             calc_device = "cpu" if (self.low_memory or N_pad > 4096) else self.device
@@ -366,8 +380,7 @@ class QuIPInt8Converter:
         # Get actual working dimensions (may be padded)
         M, N = W.shape
         
-        # Ensure buffers are ready with actual (potentially padded) dimensions
-        self._ensure_buffers(M, N, self.block_size)
+        # Note: buffers will be allocated later with correct ldlq_device
         
         # 3. Damping (same as GPTQ)
         dead = torch.diag(H) == 0
@@ -382,22 +395,34 @@ class QuIPInt8Converter:
         perm = None
         if self.actorder:
             perm = torch.argsort(torch.diag(H), descending=True)
-            W = W[:, perm]
-            H = H[perm][:, perm]
+            
+            # In low_memory mode, do permutation on CPU to avoid OOM from fancy indexing
+            if self.low_memory:
+                H_cpu = H.cpu()
+                perm_cpu = perm.cpu()
+                H = H_cpu[perm_cpu][:, perm_cpu]
+                W = W[:, perm]
+            else:
+                W = W[:, perm]
+                H = H[perm][:, perm]
         
         # 5. Hessian Inversion (Cholesky)
         # Use CPU for inversion if N is large to save VRAM
         hessian_device = "cpu" if (N > 4096 or self.low_memory) else self.device
         H_inv_work = H.to(hessian_device)
         
+        # CRITICAL FIX: For low_memory mode with large matrices, keep Hinv AND run LDLQ on CPU
+        # This avoids OOM when Hinv is 16384x16384 (1GB+)
+        ldlq_device = "cpu" if (self.low_memory and N > 8192) else self.device
+        
         try:
             H_inv_chol = torch.linalg.cholesky(H_inv_work)
             H_inv = torch.cholesky_inverse(H_inv_chol)
             H_inv = torch.linalg.cholesky(H_inv, upper=True)
-            Hinv = H_inv.to(self.device)
+            Hinv = H_inv.to(ldlq_device)  # Keep on CPU for large low_memory cases
         except RuntimeError as e:
             verbose(f"      - QuIP Hessian inversion failed on {hessian_device}: {e}. Falling back to identity.")
-            Hinv = torch.eye(N, device=self.device)
+            Hinv = torch.eye(N, device=ldlq_device)
 
         # 6. LDLQ Quantization Loop (similar to GPTQ)
         # Keep target for learned rounding if enabled
@@ -407,8 +432,21 @@ class QuIPInt8Converter:
         abs_max_per_row = W.abs().amax(dim=1, keepdim=True)
         scale = (abs_max_per_row / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
         
+        # Move W to ldlq_device if needed (for CPU-based LDLQ in low_memory mode)
+        if ldlq_device != self.device:
+            W = W.to(ldlq_device)
+            scale = scale.to(ldlq_device)
+            debug(f"      [OOM-FIX] Running LDLQ on CPU (N={N}, Hinv size={(N*N*4)/(1024**2):.0f}MB)")
+        
+        # Ensure buffers are on the correct device
+        self._ensure_buffers(M, N, self.block_size, ldlq_device)
+        
         # Run LDLQ (possibly with multiple iterations)
         Q_prime = self._ldlq_with_iterations(W, Hinv, scale, iterations=self.ldlq_iterations)
+        
+        # Move Q_prime back to main device if LDLQ ran on CPU
+        if ldlq_device != self.device:
+            Q_prime = Q_prime.to(self.device)
         
         # Optional: Learned Rounding Post-Optimization
         if self.use_learned_rounding and W_target is not None:
