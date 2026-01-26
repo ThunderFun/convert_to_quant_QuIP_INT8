@@ -207,7 +207,6 @@ convert_to_quant -i model.safetensors --optimizer quip --calibration-lora my_lor
 For the best results when using LoRAs with quantized models:
 
 - **Use QuIP without SmoothQuant**: Non-SmoothQuant QuIP runs provide the best LoRA compatibility. The QuIP optimizer delivers the highest weight fidelity without the activation-to-weight transformations that SmoothQuant applies, which is crucial for maintaining compatibility with LoRAs trained on the original base model.
-- **Avoid SmoothQuant for LoRA use cases**: While SmoothQuant can improve quantization accuracy for some models, it modifies the weight space in ways that can reduce LoRA compatibility. Use plain QuIP (without `--smoothquant`) for maximum LoRA compatibility.
 - **LoRA-Informed Calibration**: If you have a specific LoRA you want to optimize for, use the `--calibration-lora` flag. This uses the LoRA's weight directions to inform the quantization process for that specific LoRA.
 
 ---
@@ -236,7 +235,6 @@ python tests/diagnose_gptq_algorithm.py
 
 ---
 
-## Acknowledgements
 
 ## Acknowledgements
 
