@@ -3,21 +3,20 @@
 This document provides ComfyUI integration patterns for quantization. These examples show how the quantization implementations in this workspace integrate with ComfyUI's inference runtime.
 
 **Related files in this workspace**:
-- [quant_ops.py](quant_ops.py) - Layout system matching ComfyUI's QuantizedTensor interface
-- [convert_to_quant.py](convert_to_quant.py) - Generates ComfyUI-compatible quantized models
-- [AGENTS.md](AGENTS.md) - Development workflows for this workspace
-- [ComfyUI_Custom_Nodes_Agent/](ComfyUI_Custom_Nodes_Agent/) - Reference patterns for ComfyUI development
+- [quant_ops.py](convert_to_quant/comfy/quant_ops.py) - Layout system matching ComfyUI's QuantizedTensor interface
+- [convert_to_quant.py](convert_to_quant/convert_to_quant.py) - Generates ComfyUI-compatible quantized models
+- [MANUAL.md](MANUAL.md) - Complete usage guide
 
 ---
 
 ## How This Workspace Fits with ComfyUI
 
-1. **Development**: This workspace develops quantization methods (FP8/INT8 algorithms, learned rounding)
+1. **Development**: This workspace develops quantization methods (INT8 algorithms, learned rounding)
 2. **Output**: Generates `.safetensors` files with `.comfy_quant` metadata compatible with ComfyUI
 3. **Runtime**: ComfyUI loads these models using its `quant_ops.py` (mirrored in this workspace)
 4. **Testing**: Load quantized models in ComfyUI to validate quality and performance
 
-**Compatibility**: The `QuantizedTensor` and layout system in [quant_ops.py](quant_ops.py) matches ComfyUI's quantization interface.
+**Compatibility**: The `QuantizedTensor` and layout system in [quant_ops.py](convert_to_quant/comfy/quant_ops.py) matches ComfyUI's quantization interface.
 
 ---
 
@@ -26,7 +25,7 @@ This document provides ComfyUI integration patterns for quantization. These exam
 QuantizedTensor class structure:
 
 ```python
-from comfy.quant_ops import QuantizedTensor
+from convert_to_quant.comfy.quant_ops import QuantizedTensor
 
 class QuantizedTensor(torch.Tensor):
     _qdata: torch.Tensor      # Quantized data storage
@@ -48,14 +47,14 @@ class QuantizedTensor(torch.Tensor):
 Creating custom quantization layouts:
 
 ```python
-from comfy.quant_ops import QuantizedLayout, register_layout_op
+from convert_to_quant.comfy.quant_ops import QuantizedLayout, register_layout_op
 import torch
 
 class MyCustomLayout(QuantizedLayout):
     """Custom quantization layout for specific use case."""
     
     @classmethod
-    def quantize(cls, tensor, scale=None, dtype=torch.float8_e4m3fn, **kwargs):
+    def quantize(cls, tensor, scale=None, dtype=torch.int8, **kwargs):
         """
         Quantize a float tensor.
         
@@ -68,9 +67,9 @@ class MyCustomLayout(QuantizedLayout):
             Tuple of (quantized_data, layout_params_dict)
         """
         if scale is None:
-            scale = tensor.abs().max() / torch.finfo(dtype).max
+            scale = tensor.abs().max() / 127
         
-        qdata = (tensor / scale).to(dtype)
+        qdata = (tensor / scale).round().clamp(-128, 127).to(dtype)
         layout_params = {
             "scale": scale,
             "orig_dtype": tensor.dtype,
@@ -109,22 +108,8 @@ def my_custom_linear(func, args, kwargs):
 Mixed precision operations factory:
 
 ```python
-from comfy.ops import mixed_precision_ops
-
-# Create ops class with quantization config
-quant_config = {
-    "layer_name.weight": {"dtype": torch.float8_e4m3fn, "scale": 0.1},
-    # ... per-layer configs
-}
-
-CustomQuantOps = mixed_precision_ops(
-    quant_config=quant_config,
-    compute_dtype=torch.bfloat16,
-    full_precision_mm=False
-)
-
-# Use in model loading
-model_options = {"custom_operations": CustomQuantOps}
+from convert_to_quant.comfy.quant_ops import QuantizedTensor
+# Note: ComfyUI's mixed_precision_ops can be configured to use these tensors
 ```
 
 ---
@@ -140,7 +125,7 @@ Models quantized with this workspace can be loaded directly in ComfyUI:
 # No special loading code needed - just use the normal model loader
 
 # The quantized model will have:
-# - weight: QuantizedTensor (int8 or fp8)
+# - weight: QuantizedTensor (int8)
 # - weight_scale: float32 tensor
 # - input_scale: float32 tensor (for INT8)
 # - .comfy_quant: metadata tensor
@@ -154,7 +139,7 @@ Models quantized with this workspace can be loaded directly in ComfyUI:
 4. **Check metrics**: visual quality, inference speed, memory usage
 5. **Test edge cases**: long prompts, high resolution, multiple batches
 
-**Implementation reference**: See [convert_to_quant.py](convert_to_quant.py) bias correction logic for quality optimization techniques.
+**Implementation reference**: See [convert_to_quant.py](convert_to_quant/convert_to_quant.py) bias correction logic for quality optimization techniques.
 
 ---
 
@@ -162,76 +147,10 @@ Models quantized with this workspace can be loaded directly in ComfyUI:
 
 ### From Research to Integration
 
-1. **Develop in this workspace**: Implement new quantization format in [quant_ops.py](quant_ops.py)
-2. **Test with converter**: Use [convert_to_quant.py](convert_to_quant.py) to quantize models
+1. **Develop in this workspace**: Implement new quantization format in [quant_ops.py](convert_to_quant/comfy/quant_ops.py)
+2. **Test with converter**: Use [convert_to_quant.py](convert_to_quant/convert_to_quant.py) to quantize models
 3. **Validate in ComfyUI**: Load and test quantized models
-4. **Document findings**: Record results in [DEVELOPMENT.md](DEVELOPMENT.md)
+4. **Document findings**: Record results in research notes
 5. **Refine implementation**: Iterate based on quality/performance metrics
 
 **Example**: The INT8 block-wise layout was developed using this workflow.
-
----
-
-### [TAG:quant:node-example]
-
-Quantization-aware custom node:
-
-```python
-import torch
-import comfy.ops
-import comfy.model_management
-from comfy.quant_ops import QuantizedTensor
-
-class QuantizeModelWeights:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "quantize_dtype": (["fp8_e4m3fn", "fp8_e5m2", "int8"],),
-            }
-        }
-    
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "quantize"
-    CATEGORY = "custom/quantization"
-    
-    def quantize(self, model, quantize_dtype):
-        dtype_map = {
-            "fp8_e4m3fn": torch.float8_e4m3fn,
-            "fp8_e5m2": torch.float8_e5m2,
-            "int8": torch.int8,
-        }
-        target_dtype = dtype_map[quantize_dtype]
-        
-        # Clone model to avoid modifying original
-        model = model.clone()
-        
-        # Apply quantization via model patcher
-        def quantize_weight(weight, **kwargs):
-            if weight.dtype in [torch.float16, torch.float32, torch.bfloat16]:
-                scale = weight.abs().max() / torch.finfo(target_dtype).max
-                return (weight / scale).to(target_dtype), {"scale": scale}
-            return weight, {}
-        
-        # Add weight hook
-        model.add_weight_hook(quantize_weight)
-        
-        return (model,)
-```
-
-### [TAG:quant:fp8-ops]
-
-FP8 operations reference:
-
-```python
-import comfy.ops
-
-# Check if FP8 is available
-if comfy.model_management.supports_fp8_compute(device):
-    # Use FP8 optimized operations
-    model_options = {
-        "custom_operations": comfy.ops.fp8_ops,
-        "fp8_optimizations": True,
-    }
-```

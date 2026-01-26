@@ -24,6 +24,12 @@ from .logging import (
     error,
     log_debug,
 )
+from .hadamard import (
+    is_power_of_two,
+    hadamard_matrix,
+    fast_hadamard_transform,
+    random_orthogonal_matrix,
+)
 
 __all__ = [
     "dict_to_tensor",
@@ -45,5 +51,8 @@ __all__ = [
     "warning",
     "error",
     "log_debug",
+    "is_power_of_two",
+    "hadamard_matrix",
+    "fast_hadamard_transform",
+    "random_orthogonal_matrix",
 ]
-

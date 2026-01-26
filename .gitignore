@@ -207,5 +207,6 @@ __marimo__/
 .continue
 
 # Test artifacts
-flux2-dev-testlayers.safetensors
-out_*.safetensors
+*.safetensors
+*.json
+!pyproject.toml

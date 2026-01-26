@@ -38,6 +38,7 @@ AVOID_KEY_NAMES = [
     "attention_norm",
     "post_attention_layernorm",
 ]
+LORA_AVOID_KEY_NAMES = ["alpha", "scale"]
 T5XXL_REMOVE_KEY_NAMES = ["decoder", "lm_head"]
 VISUAL_AVOID_KEY_NAMES = ["mlp.down_proj", "mlp.up_proj", "mlp.gate_proj"]
 QWEN_AVOID_KEY_NAMES = ["norm_added_k", "norm_added_q", "norm_k", "norm_q", "txt_norm"]
@@ -130,14 +131,6 @@ ZIMAGE_LAYER_KEYNAMES = [
 ZIMAGE_REFINER_LAYER_KEYNAMES = ["context_refiner", "noise_refiner"]
 
 # --- Model Filter Registry ---
-# Each entry maps a CLI flag (--radiance, --flux2, etc.) to its layer patterns.
-# Keys:
-#   "help"     - Help text for CLI
-#   "category" - For grouping in --help-filters (text, diffusion, video, image)
-#   "exclude"  - Layers to skip quantization entirely (extends AVOID_KEY_NAMES)
-#   "highprec" - Layers to keep in high precision (not quantized)
-#   "remove"   - Layers to remove from output entirely (rare, e.g., T5XXL decoder)
-
 MODEL_FILTERS = {
     # Text Encoders
     "t5xxl": {
@@ -218,6 +211,11 @@ MODEL_FILTERS = {
         "exclude": ZIMAGE_AVOID_KEY_NAMES,
         "highprec": ZIMAGE_REFINER_LAYER_KEYNAMES,
     },
+    "lora": {
+        "help": "LoRA model: skip alpha/scale, quantize lora_up/down",
+        "category": "diffusion",
+        "exclude": LORA_AVOID_KEY_NAMES,
+    },
 }
 
 
@@ -244,77 +242,46 @@ def build_exclusion_patterns(active_filters: dict) -> tuple:
     return exclude, highprec, remove
 
 # --- Dtype settings ---
-TARGET_FP8_DTYPE = torch.float8_e4m3fn
 TARGET_INT8_DTYPE = torch.int8
 COMPUTE_DTYPE = torch.float32
 SCALE_DTYPE = torch.float32
-
-# FP8 constants
-FP8_MIN = float(torch.finfo(TARGET_FP8_DTYPE).min)
-FP8_MAX = float(torch.finfo(TARGET_FP8_DTYPE).max)
-FP8_MIN_POS = float(torch.finfo(TARGET_FP8_DTYPE).tiny)
 
 # INT8 constants (using symmetric range [-127, 127] for symmetric quantization)
 INT8_MIN = int(torch.iinfo(TARGET_INT8_DTYPE).min)  # -128
 INT8_MAX = int(torch.iinfo(TARGET_INT8_DTYPE).max)  # 127
 INT8_SYMMETRIC_MAX = min(abs(INT8_MIN), INT8_MAX)  # 127 (symmetric range)
 
-# FP4 NVFP4 E2M1 constants
-TARGET_FP4_DTYPE = torch.uint8  # Packed format (2 values per byte)
-FP4_E2M1_MAX = 6.0
-FP4_E2M1_EPS = 0.5
-FP4_BLOCK_SIZE = 16  # NVFP4 uses 16-element blocks
-
-# MXFP8 (Microscaling FP8) constants
-# MXFP8 uses FP8 E4M3 data with E8M0 (power-of-2 exponent) block scales
-MXFP8_BLOCK_SIZE = 32  # MXFP8 uses 32-element blocks
-MXFP8_DTYPE = torch.float8_e4m3fn  # Data stored as FP8 E4M3
-E8M0_BIAS = 127  # Exponent bias for E8M0 format (value = 2^(exp - 127))
-
 # --- Adaptive LR Tier Configuration ---
-# Used by 'original' optimizer in LearnedRoundingConverter and LearnedNVFP4Converter.
-# Format: List of (counter_threshold, improvement_mult, decay_mult, min_lr)
-#   - counter_threshold: worse_loss_counter must be >= this to use this tier
-#   - improvement_mult: LR multiplier when loss improves (boost)
-#   - decay_mult: LR multiplier when loss worsens (decay)
-#   - min_lr: minimum LR floor for decay operations at this tier
+# Used by 'original' optimizer in LearnedRoundingConverter.
 ADAPTIVE_LR_TIERS_IMPROVE = [
-    # (counter_threshold, multiplier, max_lr)
-    (0, 1.25, 100.0),     # counter < 50: boost by 1.25x
-    (50, 1.375, 100.0),   # 50 <= counter < 75
-    (75, 1.5, 100.0),     # 75 <= counter < 100
-    (100, 1.75, 100.0),   # 100 <= counter < 125
-    (125, 2.0, 100.0),    # 125 <= counter < 150
-    (150, 2.25, 100.0),   # 150 <= counter < 200
-    (200, 2.5, 100.0),    # 200 <= counter < 250
-    (250, 2.75, 100.0),   # 250 <= counter < 300
-    (300, 3.0, 100.0),    # counter >= 300
+    (0, 1.25, 100.0),
+    (50, 1.375, 100.0),
+    (75, 1.5, 100.0),
+    (100, 1.75, 100.0),
+    (125, 2.0, 100.0),
+    (150, 2.25, 100.0),
+    (200, 2.5, 100.0),
+    (250, 2.75, 100.0),
+    (300, 3.0, 100.0),
 ]
 
 ADAPTIVE_LR_TIERS_DECAY = [
-    # (counter_threshold, multiplier, min_lr)
-    (0, 0.95, 9e-8),      # counter < 26: decay by 0.95x
-    (26, 0.97, 8e-8),     # 26 <= counter < 51
-    (51, 0.985, 7e-8),    # 51 <= counter < 76
-    (76, 0.9875, 6e-8),   # 76 <= counter < 101
-    (101, 0.98875, 5e-8), # 101 <= counter < 151
-    (151, 0.99, 4e-8),    # 151 <= counter < 201
-    (201, 0.99125, 3e-8), # 201 <= counter < 251
-    (251, 0.9925, 2e-8),  # 251 <= counter < 301
-    (301, 0.995, 5e-9),   # counter >= 301
+    (0, 0.95, 9e-8),
+    (26, 0.97, 8e-8),
+    (51, 0.985, 7e-8),
+    (76, 0.9875, 6e-8),
+    (101, 0.98875, 5e-8),
+    (151, 0.99, 4e-8),
+    (201, 0.99125, 3e-8),
+    (251, 0.9925, 2e-8),
+    (301, 0.995, 5e-9),
 ]
 
 # Valid quantization formats (maps to QUANT_ALGOS in quant_ops.py)
 VALID_QUANT_FORMATS = {
-    "float8_e4m3fn",
-    "float8_e4m3fn_rowwise",
-    "float8_e4m3fn_blockwise",
-    "float8_e4m3fn_block3d",
     "int8_blockwise",
     "int8_tensorwise",
-    "nvfp4",  # NVIDIA FP4 E2M1 block quantization
-    "mxfp8",  # Microscaling FP8 block quantization
-    "hybrid_mxfp8",  # Hybrid MXFP8 (MXFP8 + tensorwise fallback)
+    "int8_axiswise",
 }
 
 # Global config: normalize 1-element scale arrays to scalars (set from CLI)

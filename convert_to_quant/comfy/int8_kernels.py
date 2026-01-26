@@ -1308,3 +1308,37 @@ def int8_gelu(
         s_y = s_y.reshape(*batch_shape, SN)
 
     return y, s_y
+
+def quip_int8_matmul(x: torch.Tensor, Q: torch.Tensor, scale: torch.Tensor, s_u: torch.Tensor, s_v: torch.Tensor) -> torch.Tensor:
+    """
+    Matmul with Hadamard-transformed weights.
+    
+    Instead of: y = x @ W
+    We compute: y = H @ (scale * Q) @ H @ (x * s_v), then apply s_u
+    
+    Since H @ H = I (with scaling), this is mathematically equivalent.
+    """
+    from ..utils.hadamard import fast_hadamard_transform
+    
+    # Apply input signs
+    x_signed = x * s_v
+    
+    # Apply Hadamard to input
+    x_had = fast_hadamard_transform(x_signed)
+    
+    # Standard int8 matmul
+    # Note: we need to handle the scale correctly. 
+    # If scale is per-row of transformed weight, it's (M, 1).
+    # int8_gemm expects b_s as (N//block, K//block).
+    # For QuIP transformed space, we might need a specialized matmul or adapt the scales.
+    
+    # For now, let's use a simple dequantized matmul as a reference/fallback
+    # In a real implementation, we'd use a specialized Triton kernel.
+    W_dequant = Q.float() * scale
+    y_had = x_had @ W_dequant.t()
+    
+    # Apply Hadamard to output
+    y = fast_hadamard_transform(y_had)
+    
+    # Apply output signs
+    return y * s_u

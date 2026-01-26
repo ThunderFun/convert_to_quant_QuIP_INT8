@@ -1,7 +1,7 @@
 """
 convert_to_quant - Quantization toolkit for safetensors models.
 
-This module provides tools for converting model weights to FP8 and INT8
+This module provides tools for converting model weights to INT8
 quantized formats with optional learned rounding optimization.
 
 Main entry point for CLI and programmatic usage.
@@ -24,19 +24,14 @@ from .constants import (
     QWEN_LAYER_KEYNAMES,
     ZIMAGE_LAYER_KEYNAMES,
     ZIMAGE_REFINER_LAYER_KEYNAMES,
-    TARGET_FP8_DTYPE,
     TARGET_INT8_DTYPE,
     COMPUTE_DTYPE,
     SCALE_DTYPE,
-    FP8_MIN,
-    FP8_MAX,
-    FP8_MIN_POS,
     INT8_MIN,
     INT8_MAX,
     INT8_SYMMETRIC_MAX,
     VALID_QUANT_FORMATS,
     NORMALIZE_SCALES_ENABLED,
-    # New registry
     MODEL_FILTERS,
     build_exclusion_patterns,
 )
@@ -64,14 +59,8 @@ from .config import (
 # Re-export converters
 from .converters import LearnedRoundingConverter
 
-# Re-export formats
-from .formats import (
-    convert_to_fp8_scaled,
-    convert_fp8_scaled_to_comfy_quant,
-    convert_int8_to_comfy_quant,
-    add_legacy_input_scale,
-    cleanup_fp8_scaled,
-)
+# Re-export quantization
+from .quantization import convert_to_int8
 
 # Re-export CLI
 from .cli import main
@@ -94,19 +83,14 @@ __all__ = [
     "QWEN_LAYER_KEYNAMES",
     "ZIMAGE_LAYER_KEYNAMES",
     "ZIMAGE_REFINER_LAYER_KEYNAMES",
-    "TARGET_FP8_DTYPE",
     "TARGET_INT8_DTYPE",
     "COMPUTE_DTYPE",
     "SCALE_DTYPE",
-    "FP8_MIN",
-    "FP8_MAX",
-    "FP8_MIN_POS",
     "INT8_MIN",
     "INT8_MAX",
     "INT8_SYMMETRIC_MAX",
     "VALID_QUANT_FORMATS",
     "NORMALIZE_SCALES_ENABLED",
-    # New registry
     "MODEL_FILTERS",
     "build_exclusion_patterns",
     # Utils
@@ -125,15 +109,12 @@ __all__ = [
     "generate_config_template",
     # Converters
     "LearnedRoundingConverter",
-    # Formats
-    "convert_to_fp8_scaled",
-    "convert_fp8_scaled_to_comfy_quant",
-    "convert_int8_to_comfy_quant",
-    "add_legacy_input_scale",
-    "cleanup_fp8_scaled",
+    # Quantization
+    "convert_to_int8",
     # CLI
     "main",
-]
+]
+
 
 if __name__ == "__main__":
     main()

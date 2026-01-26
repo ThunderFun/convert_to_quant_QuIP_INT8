@@ -1,4 +1,4 @@
-# Core dependencies for convert_fp8_svd_learn_w_blockwise_comfy_rev2.py
+# Core dependencies for convert_to_quant
 torch>=2.1.0
 safetensors>=0.4.2
 tqdm

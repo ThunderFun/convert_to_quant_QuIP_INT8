@@ -1,22 +1,14 @@
 """Converters package for convert_to_quant."""
 from .base_converter import BaseLearnedConverter
 from .learned_rounding import LearnedRoundingConverter
-from .nvfp4_converter import NVFP4Converter, quantize_nvfp4, dequantize_nvfp4
-from .learned_nvfp4 import LearnedNVFP4Converter
-from .mxfp8_converter import MXFP8Converter, quantize_mxfp8, dequantize_mxfp8
-from .learned_mxfp8 import LearnedMXFP8Converter
+from .gptq_int8 import GPTQInt8Converter
+from .quip_int8 import QuIPInt8Converter
+from .smoothquant import SmoothQuantPreprocessor
 
 __all__ = [
     "BaseLearnedConverter",
     "LearnedRoundingConverter",
-    "NVFP4Converter",
-    "quantize_nvfp4",
-    "dequantize_nvfp4",
-    "LearnedNVFP4Converter",
-    "MXFP8Converter",
-    "quantize_mxfp8",
-    "dequantize_mxfp8",
-    "LearnedMXFP8Converter",
+    "GPTQInt8Converter",
+    "QuIPInt8Converter",
+    "SmoothQuantPreprocessor",
 ]
-
-

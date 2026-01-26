@@ -1,83 +1,91 @@
 # convert_to_quant
 
-**Convert safetensors weights to quantized formats (FP8, INT8, NVFP4, MXFP8) with learned rounding optimization for ComfyUI inference.**
+**Convert safetensors weights to quantized formats (INT8, FP16) with learned rounding optimization for ComfyUI inference.**
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+> [!WARNING]
+> **Experimental State**: This project is a fork, currently in a rough state, and has not been extensively tested. It might not be actively maintained. Use with caution.
 
 ---
 
 ## Installation
 
+> [!IMPORTANT]
+> **PyTorch must be installed first** with the correct CUDA version for your GPU.
+> This package does not install PyTorch automatically to avoid conflicts with your existing setup.
+
+### Step 1: Install PyTorch (GPU-specific)
+
+Visit [pytorch.org](https://pytorch.org/get-started/locally/) to get the correct install command for your system.
+
+**Examples:**
+
 ```bash
-pip install convert_to_quant
+# CUDA 12.8 (stable)
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# CPU only (no GPU acceleration)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-**Or install from source:**
+### Step 2: Install convert_to_quant
 
 ```bash
+# Install from source
 git clone https://github.com/silveroxides/convert_to_quant.git
 cd convert_to_quant
 pip install -e .
 ```
 
----
-
-## Requirements Summary
-
-| Feature | Requirement |
-|---------|-------------|
-| **Minimum (FP8/INT8)** | Python 3.10+, PyTorch 2.8+, CUDA 12.8+ |
-| **Full (NVFP4/MXFP8)** | Python 3.12+, PyTorch 2.10+, CUDA 13.0+, **[comfy-kitchen](https://github.com/silveroxides/comfy-kitchen)** |
-| **INT8 Kernels** | Triton (Linux native, Windows via `triton-windows`) |
-
-> [!IMPORTANT]
-> **PyTorch must be installed manually** with the correct CUDA version for your GPU.
-> This package does not install PyTorch automatically to prevent environment conflicts.
-
----
-
-## Detailed Installation (GPU-Specific)
-
-### 1. Install PyTorch
-Visit [pytorch.org](https://pytorch.org/get-started/locally/) to get the correct install command.
-
-**Examples:**
+### Optional: Triton (needed for INT8 kernels)
 
 ```bash
-# CUDA 13.0 (Required for Blackwell NVFP4/MXFP8)
-pip install torch --index-url https://download.pytorch.org/whl/cu130
-
-# CUDA 12.8 (Stable)
-pip install torch --index-url https://download.pytorch.org/whl/cu128
-
-# CPU only
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-```
-
-### 2. Optional: Triton (needed for blockwise INT8)
-
-```bash
-# Linux
+On Linux
 pip install -U triton
 
-# Windows (Example for torch>=2.9)
-pip install -U "triton-windows<3.6"
+On Windows
+# for torch>=2.6
+pip install -U "triton-windows<3.3"
 ```
 
 ---
 
 ## Quick Start
 
+**Recommended: QuIP for near-lossless INT8 quantization (highest weight fidelity, best for LoRA compatibility)**
+
+> **Note:** QuIP is optimized for transformer architectures (text encoders, diffusion transformers, etc.). For other model types, the default learned rounding optimizer may be more suitable.
+
 ```bash
-# Basic FP8 quantization with ComfyUI metadata (recommended)
+convert_to_quant -i model.safetensors --optimizer quip --comfy_quant
+```
+
+**QuIP with SmoothQuant for maximum accuracy (best for models with activation outliers, may reduce LoRA compatibility)**
+
+```bash
+convert_to_quant -i model.safetensors --optimizer quip --smoothquant --comfy_quant
+```
+
+**Basic INT8 quantization with ComfyUI metadata (default optimizer)**
+
+```bash
 convert_to_quant -i model.safetensors --comfy_quant
+```
 
-# INT8 Block-wise with SVD optimization
-convert_to_quant -i model.safetensors --int8 --block_size 128 --comfy_quant
+**Low VRAM / Memory-efficient mode**
 
-# Blackwell NVFP4 (4-bit)
-convert_to_quant -i model.safetensors --nvfp4 --comfy_quant
+```bash
+convert_to_quant -i model.safetensors --comfy_quant --low-memory
+```
+
+**With custom learning rate (adaptive schedule by default)**
+
+```bash
+convert_to_quant -i model.safetensors --comfy_quant --lr 0.01
 ```
 
 Load the output `.safetensors` file in ComfyUI like any other model.
@@ -86,15 +94,10 @@ Load the output `.safetensors` file in ComfyUI like any other model.
 
 ## Supported Quantization Formats
 
-| Format | CLI Flag | Hardware | Optimization |
-|--------|----------|----------|--------------|
-| **FP8 (E4M3)** | *(default)* | Ada/Hopper+ | Learned Rounding (SVD) |
-| **INT8 Block-wise**| `--int8` | Any GPU | Learned Rounding (SVD) |
-| **INT8 Tensor-wise**| `--int8 --scaling_mode tensor` | Any GPU | High-perf `_scaled_mm` |
-| **NVFP4 (4-bit)** | `--nvfp4` | Blackwell | Dual-scale optimization |
-| **MXFP8** | `--mxfp8` | Blackwell | Microscaling (E8M0) |
-
-For a deep dive into how these formats work, see **[FORMATS.md](docs/FORMATS.md)**.
+| Format | Flag | Hardware | Notes |
+|--------|------|----------|-------|
+| INT8 (block-wise) | *(default)* | Any GPU / CPU | Good balance of quality/speed |
+| FP16 | `--fp16` | Any GPU / CPU | High precision fallback |
 
 ---
 
@@ -103,53 +106,147 @@ For a deep dive into how these formats work, see **[FORMATS.md](docs/FORMATS.md)
 | Model | Flag | Notes |
 |-------|------|-------|
 | Flux.2 | `--flux2` | Keep modulation/guidance/time/final high-precision |
-| T5-XXL | `--t5xxl` | Decoder removed |
-| Hunyuan Video| `--hunyuan`| Attention norms excluded |
-| WAN Video | `--wan` | Time embeddings excluded |
-
-*(See `--help-filters` for a full list of presets)*
+| LoRA | `--lora` | Skip alpha/scale, quantize lora_up/down |
+| T5-XXL Text Encoder | `--t5xxl` | Decoder removed, skip norms/biases |
+| Mistral Text Encoder | `--mistral` | Norms/biases excluded |
+| Visual Encoder | `--visual` | MLP layers excluded |
+| Hunyuan Video | `--hunyuan` | Attention norms and vision_in excluded |
+| WAN Video | `--wan` | Embeddings, encoders, and head excluded |
+| Qwen Image | `--qwen` | Image layers and added norms excluded |
+| Z-Image | `--zimage` | cap_embedder/norms excluded |
+| Z-Image Refiner | `--zimage_refiner` | Context/noise refiner high-precision |
 
 ---
 
 ## Documentation
 
 - 📖 **[MANUAL.md](MANUAL.md)** - Complete usage guide with examples and troubleshooting
-- 📚 **[FORMATS.md](docs/FORMATS.md)** - Technical reference for quantization formats
-- 🧪 **[DEVELOPMENT.md](DEVELOPMENT.md)** - Changelog and research notes
-- 📋 **[AGENTS.md](AGENTS.md)** - Developer guide & registry architecture
+- 🔗 **[quantization.examples.md](quantization.examples.md)** - ComfyUI integration patterns
+- 🧪 **[tests/](tests/)** - Functional tests and diagnostic scripts
+
+---
+
+## Project Structure
+
+```
+convert_to_quant/
+├── convert_to_quant/            # Main package
+│   ├── cli/                     # CLI entry point & argument parsing
+│   ├── comfy/                   # ComfyUI integration components & kernels
+│   ├── config/                  # Layer configuration & templates
+│   ├── converters/              # Core quantization logic (INT8, GPTQ, SmoothQuant)
+│   ├── utils/                   # Shared utilities (tensor, memory, metrics)
+│   ├── constants.py             # Model Filter Registry & constants
+│   ├── quantization.py          # Simplified INT8 entry point
+│   └── convert_to_quant.py      # Backward-compatibility wrapper
+├── pyproject.toml               # Package configuration
+├── MANUAL.md                    # User documentation
+└── ...
+```
 
 ---
 
 ## Key Features
 
-- **Learned Rounding**: SVD-based optimization minimizes quantization error.
-- **Bias Correction**: Automatic bias adjustment using synthetic calibration data.
-- **Model-Specific Support**: Exclusion lists for sensitive layers (norms, embeddings).
-- **Three-Tier Quantization**: Mix different formats per layer using `--custom-layers`.
+- **QuIP (Quantization with Incoherence Processing)**: Near-lossless INT8 quantization using randomized Hadamard transforms to eliminate outliers and make weights more quantization-friendly. Optimized for transformer architectures.
+- **Learned Rounding**: SVD-based optimization minimizes quantization error in weight's principal directions
+- **GPTQ Optimizer**: Sequential layer-wise optimization with error compensation
+- **SmoothQuant**: Preprocessing to migrate quantization difficulty from activations to weights
+- **LoRA-Informed Calibration**: Use existing LoRA tensors (`--calibration-lora`) to guide the quantization process for better compatibility
+- **Multiple Optimizers**: QuIP, GPTQ, AdamW, RAdam, and the original adaptive LR optimizer
+- **Bias Correction**: Automatic bias adjustment using synthetic calibration data
+- **Model-Specific Support**: Exclusion lists for sensitive layers (norms, embeddings, distillation)
+- **Triton Kernels**: GPU-accelerated quantization/dequantization with fallback to PyTorch
+- **Layer Config JSON**: Fine-grained per-layer control with regex pattern matching
+- **LR Schedules**: Adaptive, exponential, and plateau learning rate scheduling
+- **Quality Metrics**: MSE and SQNR reporting for validation
 
 ---
 
 ## Advanced Usage
 
 ### Layer Config JSON
-Define per-layer settings with regex patterns:
+
+Define per-layer quantization settings with regex patterns:
+
 ```bash
+# Generate a template from your model
+convert_to_quant -i model.safetensors --dry-run create-template
+
+# Apply custom layer config
 convert_to_quant -i model.safetensors --layer-config layers.json --comfy_quant
 ```
 
 ### Scaling Modes
+
 ```bash
-# Block-wise scaling for better accuracy
-convert_to_quant -i model.safetensors --scaling-mode block --block_size 64 --comfy_quant
+# Block-wise scaling (default)
+convert_to_quant -i model.safetensors --scaling-mode block --block_size 128 --comfy_quant
+
+# Axis-wise (per-row) scaling
+convert_to_quant -i model.safetensors --scaling-mode axis --comfy_quant
+
+# Tensor-wise scaling
+convert_to_quant -i model.safetensors --scaling-mode tensor --comfy_quant
 ```
+
+### Quality Reporting & Calibration
+
+```bash
+# INT8 with SmoothQuant, GPTQ, and internal calibration
+convert_to_quant -i model.safetensors --smoothquant --optimizer gptq --report-quality --comfy_quant
+
+# With LoRA-informed calibration for best results
+convert_to_quant -i model.safetensors --optimizer quip --calibration-lora my_lora.safetensors --comfy_quant
+```
+
+---
+
+## LoRA Compatibility
+
+For the best results when using LoRAs with quantized models:
+
+- **Use QuIP without SmoothQuant**: Non-SmoothQuant QuIP runs provide the best LoRA compatibility. The QuIP optimizer delivers the highest weight fidelity without the activation-to-weight transformations that SmoothQuant applies, which is crucial for maintaining compatibility with LoRAs trained on the original base model.
+- **Avoid SmoothQuant for LoRA use cases**: While SmoothQuant can improve quantization accuracy for some models, it modifies the weight space in ways that can reduce LoRA compatibility. Use plain QuIP (without `--smoothquant`) for maximum LoRA compatibility.
+- **LoRA-Informed Calibration**: If you have a specific LoRA you want to optimize for, use the `--calibration-lora` flag. This uses the LoRA's weight directions to inform the quantization process for that specific LoRA.
+
+---
+
+## Testing
+
+The repository includes a suite of functional tests and diagnostic scripts in the `tests/` directory.
+
+```bash
+# Run functional regression tests (requires a test safetensors file)
+python tests/test_functional.py path/to/model.safetensors
+
+# Run specific diagnostic scripts
+python tests/diagnose_gptq_algorithm.py
+```
+
+---
+
+## Requirements
+
+- Python 3.9+
+- PyTorch 2.1+ (with CUDA for GPU acceleration)
+- safetensors >= 0.4.2
+- tqdm
+- (Optional) triton >= 2.1.0 for INT8 kernels
 
 ---
 
 ## Acknowledgements
 
-Special thanks to:
-- [Clybius](https://github.com/Clybius) – For [Learned-Rounding](https://github.com/Clybius/Learned-Rounding) inspiration.
-- [lyogavin](https://github.com/lyogavin) – For ComfyUI `int8_blockwise` support.
+## Acknowledgements
+
+### Original Project (Pre-Fork)
+- [Clybius](https://github.com/Clybius) – For inspiring the project and the [Learned-Rounding](https://github.com/Clybius/Learned-Rounding) repository.
+- [lyogavin](https://github.com/lyogavin) – For ComfyUI PR [#10864](https://github.com/comfyanonymous/ComfyUI/pull/10864) adding `int8_blockwise` format support and int8 kernels.
+
+### Current Project
+- [silveroxides](https://github.com/silveroxides) – For ongoing support and providing the main code for this project.
+- [dxqb](https://github.com/dxqb) – For providing the axis-wise implementation (originally from [OneTrainer PR #1034](https://github.com/Nerogar/OneTrainer/pull/1034)).
 
 ---
 

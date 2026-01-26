@@ -15,8 +15,6 @@ from ..constants import MODEL_FILTERS
 
 EXPERIMENTAL_ARGS = {
     "int8",
-    "nvfp4",
-    "mxfp8",
     "fallback",
     "custom_layers",
     "custom_type",
@@ -29,6 +27,17 @@ EXPERIMENTAL_ARGS = {
     "layer_config",
     "layer_config_fullmatch",
     "gen_layer_template",
+    "report_quality",
+    "quality_threshold",
+    "smoothquant",
+    "smoothquant_alpha",
+    "gptq_actorder",
+    "gptq_fast",
+    "gptq_turbo",
+    "static_activations",
+    "quip_actorder",
+    "quip_hadamard",
+    "quip_seed",
 }
 
 # Generated from MODEL_FILTERS registry
@@ -40,7 +49,6 @@ ADVANCED_ARGS = {
     "early_stop_loss",
     "early_stop_lr",
     "early_stop_stall",
-    "scale_refinement_rounds",
 }
 
 class MultiHelpArgumentParser(argparse.ArgumentParser):
@@ -127,13 +135,11 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
 
         format_args = [
             "int8",
-            "nvfp4",
-            "mxfp8",
-            "make_hybrid_mxfp8",
-            "tensor_scales_path",
             "fallback",
             "block_size",
             "scaling_mode",
+            "smoothquant",
+            "smoothquant_alpha",
         ]
         for action in self._all_actions:
             if self._get_dest_name(action) in format_args:
@@ -174,7 +180,7 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
         print("Performance Tuning:")
         print("-" * 40)
 
-        perf_args = ["heur"]
+        perf_args = ["heur", "report_quality", "quality_threshold"]
         for action in self._all_actions:
             if self._get_dest_name(action) in perf_args:
                 line = self._format_action_help(action)
@@ -244,17 +250,6 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
         early_args = ["early_stop_loss", "early_stop_lr", "early_stop_stall"]
         for action in self._all_actions:
             if self._get_dest_name(action) in early_args:
-                line = self._format_action_help(action)
-                if line:
-                    print(line)
-
-        print()
-        print("NVFP4 Scale Optimization:")
-        print("-" * 40)
-
-        scale_args = ["scale_refinement_rounds"]
-        for action in self._all_actions:
-            if self._get_dest_name(action) in scale_args:
                 line = self._format_action_help(action)
                 if line:
                     print(line)
