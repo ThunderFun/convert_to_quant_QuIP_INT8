@@ -25,20 +25,17 @@ Examples:
     parser.add_argument("--dry-run-batch", action="store_true", help="Show what commands would be executed without running them.")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt.")
     
-    # We want to allow passing any other arguments to the underlying script
     args, unknown = parser.parse_known_args()
 
     if ("-o" in unknown or "--output" in unknown) and not args.dry_run_batch:
         print("Warning: You have specified an output path with -o/--output.")
         print("In batch mode, this will cause all models to be saved to the SAME file, overwriting each other.")
         print("It is recommended to omit -o/--output to let the script generate unique filenames.")
-        # In non-interactive environments, we might want to proceed or abort.
-        # For safety, let's just print a strong warning.
+
 
     input_files = []
     if args.inputs:
         for item in args.inputs:
-            # Handle cases where shell expansion might not have happened or for manual lists
             expanded = glob.glob(item)
             if expanded:
                 input_files.extend(expanded)
@@ -51,10 +48,9 @@ Examples:
             print(f"No files matching {args.pattern} found in {args.directory}")
             return
 
-    # Remove duplicates and sort
+
     input_files = sorted(list(set(input_files)))
 
-    # Summarize parameters from unknown args
     print(f"\n{'='*40}")
     print("Batch Configuration Summary")
     print(f"{'='*40}")
@@ -70,13 +66,7 @@ Examples:
     peek_parser.add_argument("--heur", action="store_true")
     peek_parser.add_argument("--fp16", action="store_true")
     peek_parser.add_argument("--quip-actorder", action="store_false", default=True) # default is True in main.py
-    peek_parser.add_argument("--no-quip-actorder", action="store_true") # handle potential negation if it existed, but main.py doesn't have it.
-    # Actually main.py has: parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP.")
-    # Wait, if action="store_true" and default=True, then it's always True unless... wait.
-    # In argparse, if default=True and action="store_true", it's always True. That's usually a bug in the parser definition if they wanted a way to disable it.
-    # Looking at main.py:
-    # parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP.")
-    # This means it's always True.
+    peek_parser.add_argument("--no-quip-actorder", action="store_true")
     
     peek_args, _ = peek_parser.parse_known_args(unknown)
     
