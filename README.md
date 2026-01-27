@@ -211,19 +211,6 @@ For the best results when using LoRAs with quantized models:
 
 ---
 
-## Testing
-
-The repository includes a suite of functional tests and diagnostic scripts in the `tests/` directory.
-
-```bash
-# Run functional regression tests (requires a test safetensors file)
-python tests/test_functional.py path/to/model.safetensors
-
-# Run specific diagnostic scripts
-python tests/diagnose_gptq_algorithm.py
-```
-
----
 
 ## Requirements
 
