@@ -9,7 +9,8 @@ from typing import Optional
 
 # Module-level configuration
 _verbose = False
-_pinned_transfer_stats = {"pinned": 0, "fallback": 0}
+_pinned_transfer_stats = {"pinned": 0, "fallback": 0}
+
 
 def set_verbose(enabled: bool):
     """Enable/disable verbose output for pinned transfers."""
@@ -23,7 +24,8 @@ def get_pinned_transfer_stats():
 def reset_pinned_transfer_stats():
     """Reset transfer statistics."""
     global _pinned_transfer_stats
-    _pinned_transfer_stats = {"pinned": 0, "fallback": 0}
+    _pinned_transfer_stats = {"pinned": 0, "fallback": 0}
+
 
 def transfer_to_gpu_pinned(
     tensor: torch.Tensor,
@@ -52,8 +54,6 @@ def transfer_to_gpu_pinned(
             result = pinned.to(device=device, dtype=dtype, non_blocking=True)
         else:
             result = pinned.to(device=device, non_blocking=True)
-
-        torch.cuda.current_stream().synchronize()
 
         # One-time confirmation on first success
         if _pinned_transfer_stats["pinned"] == 0:

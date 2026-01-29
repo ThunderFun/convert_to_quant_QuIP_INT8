@@ -38,6 +38,16 @@ EXPERIMENTAL_ARGS = {
     "quip_actorder",
     "quip_hadamard",
     "quip_seed",
+    "streaming_mode",
+    "stream_hadamard_threshold",
+    "stream_hessian_threshold",
+    "stream_ldlq_threshold",
+    "stream_ortho_threshold",
+    "bf16_compute",
+    "bf16_threshold",
+    "bf16_hadamard_threshold",
+    "bf16_hessian_threshold",
+    "no_memory_limits",
 }
 
 # Generated from MODEL_FILTERS registry
@@ -177,12 +187,46 @@ class MultiHelpArgumentParser(argparse.ArgumentParser):
                     print(line)
 
         print()
+        print("Streaming & Memory Management:")
+        print("-" * 40)
+
+        streaming_args = [
+            "streaming_mode",
+            "stream_hadamard_threshold",
+            "stream_hessian_threshold",
+            "stream_ldlq_threshold",
+            "stream_ortho_threshold",
+            "no_memory_limits",
+        ]
+        for action in self._all_actions:
+            if self._get_dest_name(action) in streaming_args:
+                line = self._format_action_help(action)
+                if line:
+                    print(line)
+
+        print()
         print("Performance Tuning:")
         print("-" * 40)
 
         perf_args = ["heur", "report_quality", "quality_threshold"]
         for action in self._all_actions:
             if self._get_dest_name(action) in perf_args:
+                line = self._format_action_help(action)
+                if line:
+                    print(line)
+
+        print()
+        print("BF16 Compute Mode (Ampere+ GPUs):")
+        print("-" * 40)
+
+        bf16_args = [
+            "bf16_compute",
+            "bf16_threshold",
+            "bf16_hadamard_threshold",
+            "bf16_hessian_threshold",
+        ]
+        for action in self._all_actions:
+            if self._get_dest_name(action) in bf16_args:
                 line = self._format_action_help(action)
                 if line:
                     print(line)

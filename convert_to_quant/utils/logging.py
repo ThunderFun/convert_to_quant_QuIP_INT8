@@ -8,6 +8,55 @@ NORMAL_LEVEL = 20
 VERBOSE_LEVEL = 15
 DEBUG_LEVEL = 10
 
+
+class LazyString:
+    """
+    Lazy string evaluation wrapper for logging.
+    
+    Usage:
+        debug("Processing tensor: %s", LazyString(lambda: expensive_operation()))
+        
+    The lambda is only called if the log level is enabled.
+    """
+    def __init__(self, fn):
+        self.fn = fn
+        
+    def __str__(self):
+        return str(self.fn())
+    
+    def __repr__(self):
+        return repr(self.fn())
+
+
+class LazyFormat:
+    """
+    Lazy format string evaluation for logging.
+    
+    Usage:
+        debug(LazyFormat("Processing {name}", name=lambda: get_name()))
+        
+    Lambdas in kwargs are only called if the log level is enabled.
+    """
+    def __init__(self, fmt: str, **kwargs):
+        self.fmt = fmt
+        self.kwargs = kwargs
+        
+    def __str__(self):
+        resolved = {k: (v() if callable(v) else v) for k, v in self.kwargs.items()}
+        return self.fmt.format(**resolved)
+
+
+def lazy_debug(fn):
+    """
+    Decorator for functions that return debug strings.
+    Only evaluates if DEBUG level is enabled.
+    """
+    def wrapper(*args, **kwargs):
+        if not get_logger().isEnabledFor(DEBUG_LEVEL):
+            return ""
+        return fn(*args, **kwargs)
+    return wrapper
+
 logging.addLevelName(VERBOSE_LEVEL, "VERBOSE")
 logging.addLevelName(MINIMAL_LEVEL, "MINIMAL")
 

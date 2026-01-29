@@ -206,7 +206,7 @@ def weight_quant_kernel(x_ptr, y_ptr, s_ptr, M, N, BLOCK_SIZE: tl.constexpr):
     # Compute per-block absolute maximum
     amax = tl.max(tl.abs(x))
     s = amax / 127.0
-    # s = tl.maximum(s, 1e-8)  # Prevent division by zero
+    s = tl.maximum(s, 1e-8)  # Prevent division by zero
 
     # Quantize
     y = x / s
@@ -328,6 +328,8 @@ int8_gemm_configs = [
 ]
 
 
+# Autotune configs are defined but disabled to avoid conflicts with explicit block sizes
+# To enable autotuning, remove BLOCK_SIZE_* kwargs from kernel calls
 # @triton.autotune(configs=int8_gemm_configs, key=["N", "K"])
 @triton.jit
 def int8_gemm_kernel(
@@ -1309,36 +1311,142 @@ def int8_gelu(
 
     return y, s_y
 
-def quip_int8_matmul(x: torch.Tensor, Q: torch.Tensor, scale: torch.Tensor, s_u: torch.Tensor, s_v: torch.Tensor) -> torch.Tensor:
+# ==============================================================================
+# QuIP Triton Kernels
+# ==============================================================================
+
+@triton.jit
+def quip_matmul_kernel(
+    x_ptr,      # Input: [M, K] float32 (already Hadamard transformed)
+    q_ptr,      # Quantized weights: [N, K] int8
+    s_ptr,      # Scale: [N] float32 (per-row scale for transformed weights)
+    y_ptr,      # Output: [M, N] float32
+    M, N: tl.constexpr, K: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
     """
-    Matmul with Hadamard-transformed weights.
+    Fused QuIP matmul kernel.
+    Computes: y = x @ (scale * Q).T
+    Where x is already in transformed space.
+    """
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
     
-    Instead of: y = x @ W
-    We compute: y = H @ (scale * Q) @ H @ (x * s_v), then apply s_u
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
     
-    Since H @ H = I (with scaling), this is mathematically equivalent.
+    # Load scale for this output column block (per-row scale for transformed weights)
+    # s has shape [N], load the scale for each column in this tile
+    s = tl.load(s_ptr + offs_n, mask=offs_n < N, other=1.0)
+    
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    
+    for k_idx in range(0, K, BLOCK_SIZE_K):
+        # Load input block [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        x_ptrs = x_ptr + offs_m[:, None] * K + (offs_k + k_idx)[None, :]
+        x_mask = (offs_m[:, None] < M) & ((offs_k + k_idx)[None, :] < K)
+        x_block = tl.load(x_ptrs, mask=x_mask, other=0.0)
+        
+        # Load weight block [BLOCK_SIZE_N, BLOCK_SIZE_K] (transposed access)
+        q_ptrs = q_ptr + offs_n[:, None] * K + (offs_k + k_idx)[None, :]
+        q_mask = (offs_n[:, None] < N) & ((offs_k + k_idx)[None, :] < K)
+        q_block = tl.load(q_ptrs, mask=q_mask, other=0).to(tl.float32)
+        
+        # Dequantize weights: w = q * s (broadcast scale across K dimension)
+        # q_block: [BLOCK_SIZE_N, BLOCK_SIZE_K]
+        # s: [BLOCK_SIZE_N] -> need to broadcast to [BLOCK_SIZE_N, BLOCK_SIZE_K]
+        w_block = q_block * s[:, None]
+        
+        # Accumulate: x @ w.T
+        # x_block: [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        # w_block: [BLOCK_SIZE_N, BLOCK_SIZE_K]
+        accumulator += tl.dot(x_block, w_block.T)
+    
+    # Store result
+    y_ptrs = y_ptr + offs_m[:, None] * N + offs_n[None, :]
+    y_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(y_ptrs, accumulator, mask=y_mask)
+
+
+def quip_int8_matmul(
+    x: torch.Tensor, 
+    Q: torch.Tensor, 
+    scale: torch.Tensor, 
+    s_u: torch.Tensor, 
+    s_v: torch.Tensor,
+    block_size: int = 128
+) -> torch.Tensor:
+    """
+    Optimized QuIP matmul with Triton kernel.
+    
+    Computes: y = x @ W where W is stored in QuIP transformed space
+    
+    The computation is:
+    1. Apply input signs: x_signed = x * s_v
+    2. Hadamard transform input: x_had = H @ x_signed
+    3. Matmul in transformed space: y_had = x_had @ (scale * Q).T
+    4. Hadamard transform output: y = H @ y_had
+    5. Apply output signs: y = y * s_u
+    
+    Args:
+        x: Input tensor [M, K] 
+        Q: Quantized weights in transformed space [N, K] (int8)
+        scale: Per-row scale for transformed weights [N] or [N, 1] or scalar
+        s_u: Output sign vector [N]
+        s_v: Input sign vector [K]
+        block_size: Block size for kernel tiling
+        
+    Returns:
+        y: Output tensor [M, N]
     """
     from ..utils.hadamard import fast_hadamard_transform
     
-    # Apply input signs
-    x_signed = x * s_v
+    M, K = x.shape
+    N = Q.shape[0]
     
-    # Apply Hadamard to input
+    # Ensure tensors are contiguous and on the same device
+    device = x.device
+    x = x.contiguous().to(device=device, dtype=torch.float32)
+    Q = Q.contiguous().to(device=device, dtype=torch.int8)
+    scale = scale.contiguous().to(device=device, dtype=torch.float32)
+    s_u = s_u.contiguous().to(device=device, dtype=torch.float32)
+    s_v = s_v.contiguous().to(device=device, dtype=torch.float32)
+    
+    # Flatten scale to 1D if needed [N, 1] -> [N] or scalar -> [N]
+    if scale.dim() > 1:
+        scale = scale.squeeze()
+    if scale.numel() == 1:
+        scale = scale.expand(N)
+    
+    # Step 1: Apply input signs
+    x_signed = x * s_v.unsqueeze(0)
+    
+    # Step 2: Hadamard transform input
     x_had = fast_hadamard_transform(x_signed)
     
-    # Standard int8 matmul
-    # Note: we need to handle the scale correctly. 
-    # If scale is per-row of transformed weight, it's (M, 1).
-    # int8_gemm expects b_s as (N//block, K//block).
-    # For QuIP transformed space, we might need a specialized matmul or adapt the scales.
+    # Step 3: Matmul using Triton kernel
+    y_had = torch.empty(M, N, device=device, dtype=torch.float32)
     
-    # For now, let's use a simple dequantized matmul as a reference/fallback
-    # In a real implementation, we'd use a specialized Triton kernel.
-    W_dequant = Q.float() * scale
-    y_had = x_had @ W_dequant.t()
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]),
+        triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
     
-    # Apply Hadamard to output
+    quip_matmul_kernel[grid](
+        x_had, Q, scale, y_had,
+        M, N, K,
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_N=64,
+        BLOCK_SIZE_K=block_size,
+    )
+    
+    # Step 4: Hadamard transform output
     y = fast_hadamard_transform(y_had)
     
-    # Apply output signs
-    return y * s_u
+    # Step 5: Apply output signs
+    y = y * s_u.unsqueeze(0)
+    
+    return y

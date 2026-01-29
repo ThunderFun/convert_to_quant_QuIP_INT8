@@ -143,6 +143,75 @@ Models quantized with this workspace can be loaded directly in ComfyUI:
 
 ---
 
+## LoRA Merging Workflow
+
+### Converting a LoRA-Enhanced Model
+
+Instead of loading LoRA separately at inference time, you can merge it into the base model and quantize the result:
+
+```python
+from convert_to_quant.quantization import convert_to_int8
+
+# Merge single LoRA and quantize
+convert_to_int8(
+    input_file="base_model.safetensors",
+    output_file="merged_quantized.safetensors",
+    comfy_quant=True,
+    merge_lora_path="style_lora.safetensors",
+    merge_lora_scale=1.0,
+    optimizer="quip"
+)
+
+# Merge multiple LoRAs with automatic dampening
+convert_to_int8(
+    input_file="base_model.safetensors",
+    output_file="merged_multi_lora.safetensors",
+    comfy_quant=True,
+    merge_lora_paths=["style_lora.safetensors", "character_lora.safetensors"],
+    merge_lora_scale=1.0,
+    merge_lora_dampen=True,
+    optimizer="quip"
+)
+```
+
+### CLI Examples
+
+```bash
+# Merge and quantize with QuIP
+convert_to_quant -i base_model.safetensors \
+    --merge-lora style_lora.safetensors \
+    --optimizer quip \
+    --comfy_quant
+
+# Merge multiple LoRAs with custom scale
+convert_to_quant -i base_model.safetensors \
+    --merge-loras lora1.safetensors lora2.safetensors \
+    --merge-lora-scale 0.8 \
+    --comfy_quant
+```
+
+### Benefits of Pre-Merging LoRAs
+
+1. **Single file deployment** - No separate LoRA loading needed at inference
+2. **Faster inference** - No runtime LoRA computation overhead
+3. **Better quantization quality** - QuIP can optimize for the merged weights rather than base + adapter separately
+4. **Simpler workflow** - One quantized file contains everything needed
+
+### Multi-LoRA Dampening
+
+When merging multiple LoRAs, automatic dampening prevents over-saturation:
+
+| LoRA Index | Scale Applied | Description |
+|------------|---------------|-------------|
+| 1st | 1.0 × `--merge-lora-scale` | Full strength |
+| 2nd | 0.9 × `--merge-lora-scale` | 10% reduction |
+| 3rd | 0.81 × `--merge-lora-scale` | 19% reduction |
+| nth | 0.9^(n-1) × `--merge-lora-scale` | Progressive dampening |
+
+Disable with `--merge-lora-dampen=False` if you want equal weighting.
+
+---
+
 ## Custom Layout Development Workflow
 
 ### From Research to Integration

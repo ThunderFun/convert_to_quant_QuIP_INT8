@@ -35,6 +35,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         target_format: str = "int8",
         smoothquant: bool = False,
         smoothquant_alpha: float = 0.5,
+        low_memory: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -42,6 +43,7 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         self.target_format = target_format
         self.smoothquant = smoothquant
         self.smoothquant_alpha = smoothquant_alpha
+        self.low_memory = low_memory
 
         if target_format == "int8" and scaling_mode not in ("tensor", "axis"):
             scaling_mode = "block"
@@ -127,23 +129,37 @@ class LearnedRoundingConverter(BaseLearnedConverter):
 
     def _optimize_int8_tensorwise_original(self, W_float32, qdata_float, scale, U_k, Vh_k):
         q_refined = qdata_float.clone()
-        best_loss, best_tensor, worse_loss_counter = float("inf"), None, 0
+        best_loss, worse_loss_counter = float("inf"), 0
         curr_lr = self.optimizer_kwargs.get("lr", 8.077300000003e-3)
         pbar = tqdm(range(self.num_iter), desc=f"    Optimizing INT8 ({self.scaling_mode})", leave=False, dynamic_ncols=True)
+        
+        # BF16 optimization check for SVD-based loss calculation
+        from ..constants import should_use_bf16_for_op
+        use_bf16 = should_use_bf16_for_op(q_refined.numel(), "svd")
+        device_type = 'cuda' if q_refined.is_cuda else 'cpu'
+        
         for i in pbar:
             with torch.no_grad():
-                loss = torch.linalg.norm(U_k.T @ (q_refined * scale - W_float32) @ Vh_k.T)
+                if use_bf16:
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        loss = torch.linalg.norm(U_k.T @ (q_refined * scale - W_float32) @ Vh_k.T)
+                else:
+                    loss = torch.linalg.norm(U_k.T @ (q_refined * scale - W_float32) @ Vh_k.T)
             if loss.item() < best_loss:
-                best_loss, best_tensor, worse_loss_counter = loss.item(), q_refined.clone(), 0
+                best_loss, worse_loss_counter = loss.item(), 0
             else:
                 worse_loss_counter += 1
             if worse_loss_counter > self.early_stop_stall: break
             with torch.no_grad():
-                grad = U_k @ ((U_k.T @ (q_refined * scale - W_float32) @ Vh_k.T) / loss.clamp_min(1e-20)) @ Vh_k
+                if use_bf16:
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        grad = U_k @ ((U_k.T @ (q_refined * scale - W_float32) @ Vh_k.T) / loss.clamp_min(1e-20)) @ Vh_k
+                else:
+                    grad = U_k @ ((U_k.T @ (q_refined * scale - W_float32) @ Vh_k.T) / loss.clamp_min(1e-20)) @ Vh_k
                 q_refined -= curr_lr * (grad * scale)
             pbar.set_postfix({"loss": f"{loss.item():.3e}", "best": f"{best_loss:.3e}"})
         pbar.close()
-        return best_tensor if best_tensor is not None else q_refined
+        return q_refined
 
     def _optimize_int8_learned_rounding(self, W_float32, qdata, scale):
         U_k, Vh_k, k = self._compute_svd_components(W_float32)
@@ -161,10 +177,21 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         optimizer = AdamW([delta], lr=curr_lr)
         best_loss, best_delta, worse_loss_counter = float("inf"), delta.detach().clone(), 0
         pbar = tqdm(range(self.num_iter), desc=f"    Optimizing INT8 (AdamW)", leave=False, dynamic_ncols=True)
+        
+        # BF16 optimization check for AdamW
+        from ..constants import should_use_bf16_for_op
+        use_bf16 = should_use_bf16_for_op(qdata_float.numel(), "svd")
+        device_type = 'cuda' if qdata_float.is_cuda else 'cpu'
+        
         for i in pbar:
             optimizer.zero_grad()
             dq = self._int8_dequantize_blockwise(qdata_float + delta, scale, M, N, self.block_size)
-            loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
+            # BF16 for forward pass, FP32 for optimizer state
+            if use_bf16:
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
+            else:
+                loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
             loss.backward()
             optimizer.step()
             if loss.item() < best_loss:
@@ -184,10 +211,20 @@ class LearnedRoundingConverter(BaseLearnedConverter):
         optimizer = RAdam([delta], lr=curr_lr)
         best_loss, best_delta, worse_loss_counter = float("inf"), delta.detach().clone(), 0
         pbar = tqdm(range(self.num_iter), desc=f"    Optimizing INT8 (RAdam)", leave=False, dynamic_ncols=True)
+        
+        # BF16 optimization check for RAdam
+        from ..constants import should_use_bf16_for_op
+        use_bf16 = should_use_bf16_for_op(qdata_float.numel(), "svd")
+        device_type = 'cuda' if qdata_float.is_cuda else 'cpu'
+        
         for i in pbar:
             optimizer.zero_grad()
             dq = self._int8_dequantize_blockwise(qdata_float + delta, scale, M, N, self.block_size)
-            loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
+            if use_bf16:
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
+            else:
+                loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
             loss.backward()
             optimizer.step()
             if loss.item() < best_loss:
@@ -202,26 +239,40 @@ class LearnedRoundingConverter(BaseLearnedConverter):
     def _optimize_int8_original(self, W_float32, qdata, scale, U_k, Vh_k):
         M, N = W_float32.shape
         q_refined = qdata.to(COMPUTE_DTYPE)
-        best_loss, best_tensor, worse_loss_counter = float("inf"), None, 0
+        best_loss, worse_loss_counter = float("inf"), 0
         curr_lr = self.optimizer_kwargs.get("lr", 8.077300000003e-3)
         pbar = tqdm(range(self.num_iter), desc=f"    Optimizing INT8 (Original)", leave=False, dynamic_ncols=True)
+        
+        # BF16 optimization check
+        from ..constants import should_use_bf16_for_op
+        use_bf16 = should_use_bf16_for_op(q_refined.numel(), "svd")
+        device_type = 'cuda' if q_refined.is_cuda else 'cpu'
+        
         for i in pbar:
             with torch.no_grad():
                 dq = self._int8_dequantize_blockwise(q_refined, scale, M, N, self.block_size)
-                loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
+                if use_bf16:
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
+                else:
+                    loss = torch.linalg.norm(U_k.T @ (dq - W_float32) @ Vh_k.T)
             if loss.item() < best_loss:
-                best_loss, best_tensor, worse_loss_counter = loss.item(), q_refined.clone(), 0
+                best_loss, worse_loss_counter = loss.item(), 0
             else:
                 worse_loss_counter += 1
             if worse_loss_counter > self.early_stop_stall: break
             with torch.no_grad():
-                grad = U_k @ ((U_k.T @ (dq - W_float32) @ Vh_k.T) / loss.clamp_min(1e-20)) @ Vh_k
+                if use_bf16:
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        grad = U_k @ ((U_k.T @ (dq - W_float32) @ Vh_k.T) / loss.clamp_min(1e-20)) @ Vh_k
+                else:
+                    grad = U_k @ ((U_k.T @ (dq - W_float32) @ Vh_k.T) / loss.clamp_min(1e-20)) @ Vh_k
                 grad_blocked = grad.reshape(M // self.block_size, self.block_size, N // self.block_size, self.block_size).permute(0, 2, 1, 3)
                 grad_scaled = (grad_blocked * scale.unsqueeze(-1).unsqueeze(-1)).permute(0, 2, 1, 3).reshape(M, N)
                 q_refined -= curr_lr * grad_scaled
             pbar.set_postfix({"loss": f"{loss.item():.3e}", "best": f"{best_loss:.3e}"})
         pbar.close()
-        return (best_tensor if best_tensor is not None else q_refined).clamp(-127.0, 127.0).round().to(TARGET_INT8_DTYPE)
+        return q_refined.clamp(-127.0, 127.0).round().to(TARGET_INT8_DTYPE)
 
     def _int8_dequantize_blockwise(self, qdata, scale, M, N, block_size):
         q_blocked = qdata.reshape(M // block_size, block_size, N // block_size, block_size).permute(0, 2, 1, 3)

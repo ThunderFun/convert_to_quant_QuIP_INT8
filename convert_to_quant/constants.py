@@ -65,6 +65,8 @@ ZIMAGE_AVOID_KEY_NAMES = [
     "k_norm",
     "q_norm",
     "x_pad_token",
+    "norm", # General norm exclusion
+    "bias", # Biases should stay in high precision
 ]
 
 # --- Layer key names for specific models (layers to include as high-precision) ---
@@ -127,6 +129,8 @@ ZIMAGE_LAYER_KEYNAMES = [
     "adaLN_modulation",
     "t_embedder",
     "time_text_embed",
+    "pos_embed", # Embeddings
+    "proj_out", # Final output layers
 ]
 ZIMAGE_REFINER_LAYER_KEYNAMES = ["context_refiner", "noise_refiner"]
 
@@ -286,3 +290,86 @@ VALID_QUANT_FORMATS = {
 
 # Global config: normalize 1-element scale arrays to scalars (set from CLI)
 NORMALIZE_SCALES_ENABLED = True
+
+
+# =============================================================================
+# BF16 Compute Mode Configuration
+# =============================================================================
+
+import os
+
+
+def get_compute_dtype() -> torch.dtype:
+    """
+    Determine compute dtype based on environment and hardware.
+    
+    Modes:
+    - "off"/"0"/"false": Force FP32
+    - "on"/"1"/"true"/"force": Force BF16 (if supported)
+    - "auto": Use BF16 on Ampere+ for eligible operations
+    
+    Returns:
+        torch.dtype: Either torch.float32 or torch.bfloat16
+    """
+    bf16_mode = os.environ.get("BF16_COMPUTE_MODE", "auto")
+    
+    if bf16_mode in ("0", "off", "false"):
+        return torch.float32
+    
+    if bf16_mode in ("1", "on", "true", "force"):
+        return _get_bf16_if_supported()
+    
+    # Auto mode - will be decided per-operation
+    return torch.float32  # Default, ops can override
+
+
+def _get_bf16_if_supported() -> torch.dtype:
+    """Check if BF16 is supported on current GPU."""
+    if not torch.cuda.is_available():
+        return torch.float32
+    
+    major, minor = torch.cuda.get_device_capability()
+    # Ampere (SM80+) and newer support BF16
+    if major >= 8:
+        return torch.bfloat16
+    return torch.float32
+
+
+def should_use_bf16_for_op(tensor_size: int, operation: str) -> bool:
+    """
+    Determine if BF16 should be used for a specific operation.
+    
+    Args:
+        tensor_size: Number of elements in the tensor
+        operation: Type of operation ("matmul", "hadamard", "hessian", etc.)
+    
+    Returns:
+        True if BF16 is recommended for this operation
+    """
+    bf16_mode = os.environ.get("BF16_COMPUTE_MODE", "auto")
+    
+    if bf16_mode in ("0", "off", "false"):
+        return False
+    
+    if bf16_mode in ("1", "on", "true", "force"):
+        return _get_bf16_if_supported() == torch.bfloat16
+    
+    # Auto mode: Use BF16 for large tensors on supported hardware
+    if _get_bf16_if_supported() != torch.bfloat16:
+        return False
+    
+    # Read thresholds from environment with defaults
+    thresholds = {
+        "matmul": int(os.environ.get("BF16_MATMUL_THRESHOLD", "1000000")),
+        "hadamard": int(os.environ.get("BF16_HADAMARD_THRESHOLD", "500000")),
+        "hessian": int(os.environ.get("BF16_HESSIAN_THRESHOLD", "1000000")),
+        "svd": int(os.environ.get("BF16_SVD_THRESHOLD", "2000000")),
+        "ldlq": int(os.environ.get("BF16_LDLQ_THRESHOLD", "500000")),
+    }
+    
+    return tensor_size >= thresholds.get(operation, 1000000)
+
+
+def get_bf16_compute_mode() -> str:
+    """Get the current BF16 compute mode setting."""
+    return os.environ.get("BF16_COMPUTE_MODE", "auto")

@@ -134,6 +134,10 @@ def main():
     parser.add_argument("--quality-threshold", type=float, default=30.0, help="SQNR threshold.")
     parser.add_argument("--calibration-data", type=str, help="Path to calibration data.")
     parser.add_argument("--calibration-lora", type=str, help="Path to LoRA file for informed calibration.")
+    parser.add_argument("--merge-lora", type=str, help="Path to LoRA file to merge into model weights before quantization.")
+    parser.add_argument("--merge-loras", nargs="+", help="Multiple LoRA files to merge (space-separated paths).")
+    parser.add_argument("--merge-lora-scale", type=float, default=1.0, help="Scale factor for LoRA merging (default: 1.0).")
+    parser.add_argument("--merge-lora-dampen", action="store_true", default=True, help="Apply dampening when merging multiple LoRAs (default: True).")
     parser.add_argument("--edit-quant", action="store_true", help="Edit .comfy_quant tensors.")
     parser.add_argument("--remove-keys", type=str, help="Keys to remove.")
     parser.add_argument("--add-keys", type=str, help="Keys to add.")
@@ -142,7 +146,47 @@ def main():
     parser.add_argument("--fullmatch", action="store_true", help="Use fullmatch for layer config.")
     parser.add_argument("--dry-run", type=str, nargs="?", const="analyze", choices=["analyze", "create-template"], help="Dry run mode.")
     parser.add_argument("--verbose-pinned", action="store_true", help="Verbose pinned memory.")
-    parser.add_argument("--low-memory", action="store_true", help="Low memory mode.")
+    parser.add_argument("--low-memory", action="store_true", help="Low memory mode (uses CPU for calculations).")
+    parser.add_argument("--no-memory-limits", action="store_true", help="Disable all memory limits and OOM prevention. Forces GPU processing with no safety checks. Use with caution.")
+    
+    # Streaming mode - unified interface
+    parser.add_argument(
+        "--streaming-mode",
+        type=str,
+        default="balanced",
+        choices=["off", "minimal", "balanced", "aggressive", "auto"],
+        help="Streaming mode for memory-efficient processing. 'auto' detects based on VRAM. (default: balanced)"
+    )
+    
+    # Per-operation streaming thresholds (override tier defaults)
+    parser.add_argument(
+        "--stream-hadamard-threshold",
+        type=int,
+        default=None,
+        help="Override: Hadamard transform element threshold"
+    )
+    parser.add_argument(
+        "--stream-hessian-threshold",
+        type=int,
+        default=None,
+        help="Override: Hessian inversion dimension threshold"
+    )
+    parser.add_argument(
+        "--stream-ldlq-threshold",
+        type=int,
+        default=None,
+        help="Override: LDLQ quantization dimension threshold"
+    )
+    parser.add_argument(
+        "--stream-ortho-threshold",
+        type=int,
+        default=None,
+        help="Override: Orthogonal matrix generation dimension threshold"
+    )
+    
+    # Deprecated: backward compatibility (hidden)
+    parser.add_argument("--streaming", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--streaming-aggressive", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--gptq-actorder", action="store_true", help="Enable GPTQ activation ordering.")
     parser.add_argument("--gptq-fast", action="store_true", default=True, help="Enable GPTQ vectorized processing.")
     parser.add_argument("--gptq-turbo", action="store_true", help="Enable GPTQ Triton kernel.")
@@ -150,12 +194,74 @@ def main():
     parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP.")
     parser.add_argument("--quip-hadamard", action="store_true", default=True, help="Use Hadamard transform for QuIP.")
     parser.add_argument("--quip-seed", type=int, default=None, help="Seed for QuIP random orthogonal matrices.")
- 
+    parser.add_argument("--quip-store-transformed", action="store_true", help="Store weights in transformed space (padded to Hadamard dimensions). Uses more memory but may improve inference speed.")
+    
+    # Checkpointed quantization for extreme memory savings
+    parser.add_argument("--quip-checkpointed", action="store_true", help="Enable checkpointed LDLQ quantization for 75-90%% memory reduction on large layers.")
+    parser.add_argument("--quip-checkpoint-threshold", type=int, default=8192, help="Dimension threshold to use checkpointed quantization (default: 8192).")
+    parser.add_argument("--quip-checkpoint-segments", type=int, default=4, help="Number of segments for checkpointed quantization (default: 4). Higher = more memory savings but slower.")
+    
+    # BF16 compute mode for faster quantization on Ampere+ GPUs
+    parser.add_argument(
+        "--bf16-compute",
+        type=str,
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Enable BF16 compute mode for faster quantization on Ampere+ GPUs. "
+             "'auto' enables BF16 for large tensors, 'on' forces BF16, 'off' disables. (default: auto)"
+    )
+    parser.add_argument(
+        "--bf16-threshold",
+        type=int,
+        default=1000000,
+        help="Minimum tensor size (elements) to use BF16 in auto mode. (default: 1000000)"
+    )
+    parser.add_argument(
+        "--bf16-hadamard-threshold",
+        type=int,
+        default=500000,
+        help="Minimum tensor size (elements) for BF16 Hadamard transform. (default: 500000)"
+    )
+    parser.add_argument(
+        "--bf16-hessian-threshold",
+        type=int,
+        default=1000000,
+        help="Minimum tensor size (elements) for BF16 Hessian calculation. (default: 1000000)"
+    )
+    
+    # Set environment variables from CLI args before importing converters
     args = parser.parse_args()
+    
+    # Set BF16 environment variables from CLI
+    if hasattr(args, 'bf16_compute') and args.bf16_compute:
+        os.environ["BF16_COMPUTE_MODE"] = args.bf16_compute
+    if hasattr(args, 'bf16_threshold') and args.bf16_threshold:
+        os.environ["BF16_MATMUL_THRESHOLD"] = str(args.bf16_threshold)
+        os.environ["BF16_SVD_THRESHOLD"] = str(args.bf16_threshold)
+        os.environ["BF16_LDLQ_THRESHOLD"] = str(args.bf16_threshold)
+    if hasattr(args, 'bf16_hadamard_threshold') and args.bf16_hadamard_threshold:
+        os.environ["BF16_HADAMARD_THRESHOLD"] = str(args.bf16_hadamard_threshold)
+    if hasattr(args, 'bf16_hessian_threshold') and args.bf16_hessian_threshold:
+        os.environ["BF16_HESSIAN_THRESHOLD"] = str(args.bf16_hessian_threshold)
+    
+    # Set no-memory-limits mode globally
+    if hasattr(args, 'no_memory_limits') and args.no_memory_limits:
+        from ..utils.memory_utils import set_no_memory_limits
+        set_no_memory_limits(True)
+        warning("WARNING: --no-memory-limits enabled. All OOM protection disabled. Use with caution!")
+    
     setup_logging(args.verbose)
     global NORMALIZE_SCALES_ENABLED
     NORMALIZE_SCALES_ENABLED = not args.no_normalize_scales
     set_pinned_verbose(args.verbose_pinned)
+
+    # Handle deprecated streaming flags with backward compatibility
+    if args.streaming:
+        warning("WARNING: --streaming is deprecated, use --streaming-mode=balanced")
+        args.streaming_mode = "balanced"
+    if args.streaming_aggressive:
+        warning("WARNING: --streaming-aggressive is deprecated, use --streaming-mode=aggressive")
+        args.streaming_mode = "aggressive"
 
     if args.static_activations and not args.calibration_data:
         warning("WARNING: --static-activations requires calibration data with input_scale values.")
@@ -190,6 +296,14 @@ def main():
     layer_config_data = load_layer_config(args.layer_config) if args.layer_config else None
     filter_flags = extract_filter_flags(args)
 
+    # Build streaming configuration
+    streaming_thresholds = {
+        "hadamard": args.stream_hadamard_threshold,
+        "hessian": args.stream_hessian_threshold,
+        "ldlq": args.stream_ldlq_threshold,
+        "ortho": args.stream_ortho_threshold,
+    }
+
     convert_to_int8(
         args.input, args.output, args.comfy_quant, filter_flags, args.calib_samples, seed,
         fp16=args.fp16, fallback=args.fallback, custom_layers=args.custom_layers,
@@ -201,13 +315,22 @@ def main():
         skip_inefficient_layers=args.heur, include_input_scale=args.input_scale,
         no_learned_rounding=args.simple, save_quant_metadata=args.save_quant_metadata,
         layer_config=layer_config_data, layer_config_fullmatch=args.fullmatch,
-        low_memory=args.low_memory, report_quality=args.report_quality,
+        low_memory=args.low_memory, streaming_mode=args.streaming_mode,
+        streaming_thresholds=streaming_thresholds,
+        no_memory_limits=args.no_memory_limits,
+        report_quality=args.report_quality,
         quality_threshold=args.quality_threshold, smoothquant=args.smoothquant,
         smoothquant_alpha=args.smoothquant_alpha, calibration_data_path=args.calibration_data,
         calibration_lora_path=args.calibration_lora,
         gptq_actorder=args.gptq_actorder, gptq_fast=args.gptq_fast, gptq_turbo=args.gptq_turbo,
         optimizer=args.optimizer, num_iter=args.num_iter, lr=args.lr, lr_schedule=args.lr_schedule,
         quip_actorder=args.quip_actorder, quip_hadamard=args.quip_hadamard, quip_seed=args.quip_seed,
+        quip_store_transformed=args.quip_store_transformed,
+        quip_checkpointed=args.quip_checkpointed,
+        quip_checkpoint_threshold=args.quip_checkpoint_threshold,
+        quip_checkpoint_segments=args.quip_checkpoint_segments,
+        merge_lora_path=args.merge_lora, merge_lora_paths=args.merge_loras,
+        merge_lora_scale=args.merge_lora_scale, merge_lora_dampen=args.merge_lora_dampen,
         top_p=args.top_p, min_k=args.min_k, max_k=args.max_k, full_matrix=args.full_matrix,
         scaling_mode=args.scaling_mode, block_size=args.block_size, lr_gamma=args.lr_gamma,
         lr_patience=args.lr_patience, lr_factor=args.lr_factor, lr_min=args.lr_min,

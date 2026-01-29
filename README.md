@@ -64,6 +64,10 @@ pip install -U "triton-windows<3.3"
 convert_to_quant -i model.safetensors --optimizer quip --comfy_quant
 ```
 
+> **Default Storage:** QuIP now stores weights in **transformed space** by default (`store_transformed=True`) for maximum numerical stability. This avoids numerical issues with the inverse Hadamard transform that can cause NaN values in the original-space re-quantization path. The stored weights include QuIP rotation matrices (`quip_s_u`, `quip_s_v`) and are dequantized on-the-fly during inference by compatible loaders.
+>
+> **For standard loaders:** Use `--quip-no-store-transformed` to store weights in original space with a single global scale (may have numerical stability issues with some models).
+
 **QuIP with SmoothQuant for maximum accuracy (best for models with activation outliers, may reduce LoRA compatibility)**
 
 ```bash
@@ -81,6 +85,22 @@ convert_to_quant -i model.safetensors --comfy_quant
 ```bash
 convert_to_quant -i model.safetensors --comfy_quant --low-memory
 ```
+
+**Streaming mode (memory-efficient with GPU acceleration)**
+
+```bash
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=balanced
+```
+
+Use `--streaming-mode=balanced` for faster quantization while still saving RAM. Unlike `--low-memory`, this keeps calculations on GPU.
+
+**Aggressive streaming mode (faster with more VRAM)**
+
+```bash
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=aggressive
+```
+
+Use `--streaming-mode=aggressive` for 10-20% faster processing on GPUs with 12GB+ VRAM. Increases GPU computation thresholds by 2x while still avoiding OOM.
 
 **With custom learning rate (adaptive schedule by default)**
 
@@ -115,6 +135,11 @@ Load the output `.safetensors` file in ComfyUI like any other model.
 | Qwen Image | `--qwen` | Image layers and added norms excluded |
 | Z-Image | `--zimage` | cap_embedder/norms excluded |
 | Z-Image Refiner | `--zimage_refiner` | Context/noise refiner high-precision |
+| Chroma/Distilled (Large) | `--distillation_large` | Keep distilled_guidance, final, img/txt_in high-precision |
+| Chroma/Distilled (Small) | `--distillation_small` | Keep only distilled_guidance high-precision |
+| NeRF (Large) | `--nerf_large` | Keep nerf_blocks, distilled_guidance, txt_in high-precision |
+| NeRF (Small) | `--nerf_small` | Keep nerf_blocks, distilled_guidance high-precision |
+| Radiance | `--radiance` | Keep img_in_patch, nerf_final_layer high-precision |
 
 ---
 
@@ -122,7 +147,7 @@ Load the output `.safetensors` file in ComfyUI like any other model.
 
 - 📖 **[MANUAL.md](MANUAL.md)** - Complete usage guide with examples and troubleshooting
 - 🔗 **[quantization.examples.md](quantization.examples.md)** - ComfyUI integration patterns
-- 🧪 **[tests/](tests/)** - Functional tests and diagnostic scripts
+- 📚 **[docs/API.md](docs/API.md)** - Python API reference for developers
 
 ---
 
@@ -148,7 +173,10 @@ convert_to_quant/
 
 ## Key Features
 
-- **QuIP (Quantization with Incoherence Processing)**: Near-lossless INT8 quantization using randomized Hadamard transforms to eliminate outliers and make weights more quantization-friendly. Optimized for transformer architectures.
+- **Unified Safetensors Loader**: Memory-efficient streaming loader with two modes:
+  - **Standard mode**: Preloads all tensors for maximum speed
+  - **Low-memory mode**: Streams tensors on-demand, loading only one tensor at a time into RAM
+- **QuIP (Quantization with Incoherence Processing)**: Near-lossless INT8 quantization using randomized Hadamard transforms to eliminate outliers and make weights more quantization-friendly. Defaults to standard `int8_tensorwise` format for maximum compatibility and inference performance.
 - **Learned Rounding**: SVD-based optimization minimizes quantization error in weight's principal directions
 - **GPTQ Optimizer**: Sequential layer-wise optimization with error compensation
 - **SmoothQuant**: Preprocessing to migrate quantization difficulty from activations to weights
@@ -160,6 +188,62 @@ convert_to_quant/
 - **Layer Config JSON**: Fine-grained per-layer control with regex pattern matching
 - **LR Schedules**: Adaptive, exponential, and plateau learning rate scheduling
 - **Quality Metrics**: MSE and SQNR reporting for validation
+- **BF16 Compute Mode**: Half-precision computation on Ampere+ GPUs for 2× memory savings
+- **Checkpointed Quantization**: Extreme memory savings (75-90%) for large layers
+- **Streaming Modes**: Configurable CPU/GPU offloading with auto-detection based on VRAM
+
+---
+
+## Optimizations
+
+The following performance optimizations are implemented:
+
+### 1. Triton Kernels ([`convert_to_quant/comfy/int8_kernels.py`](convert_to_quant/comfy/int8_kernels.py))
+GPU-accelerated INT8 quantization/dequantization with autotuning for optimal block sizes.
+- `int8_gemm`, `int8_addmm` - Optimized matrix multiplication
+- `act_quant`, `weight_quant`, `act_dequant`, `weight_dequant` - Fast quantization ops
+- Automatic fallback to PyTorch when Triton is unavailable
+
+### 2. QuIP Triton Matmul ([`convert_to_quant/comfy/int8_kernels.py`](convert_to_quant/comfy/int8_kernels.py))
+Specialized matrix multiplication for QuIP-quantized weights with Hadamard transform support.
+- `quip_int8_matmul()` - Optimized for QuIP's transformed weight format
+- Supports sign vectors (s_u, s_v) and inverse transforms
+
+### 3. Tensor Buffer Pool ([`convert_to_quant/converters/quip_int8.py`](convert_to_quant/converters/quip_int8.py))
+Efficient buffer reuse during quantization to reduce memory allocations.
+- `TensorBufferPool` class with LRU eviction
+- Configurable `max_buffers` limit
+- Reduces GC pressure during iterative optimization
+
+### 4. CUDA Graph Support ([`convert_to_quant/converters/base_converter.py`](convert_to_quant/converters/base_converter.py))
+Capture and replay CUDA graphs to eliminate CPU launch overhead.
+- `CudaGraphRunner` class for repeatable kernel sequences
+- Warmup iterations before capture
+- Ideal for batched inference scenarios
+
+### 5. Parallel Processing ([`convert_to_quant/quantization.py`](convert_to_quant/quantization.py))
+Thread pool for I/O-bound layer-wise operations.
+- `ParallelProcessor` with `ThreadPoolExecutor`
+- Configurable `max_workers`
+- Falls back to sequential for single items
+
+### 6. Lazy Logging ([`convert_to_quant/utils/logging.py`](convert_to_quant/utils/logging.py))
+Defer expensive string formatting until messages are actually logged.
+- `LazyString` - On-demand string evaluation
+- `LazyFormat` - Dynamic value evaluation
+- Reduces overhead when log level filters messages
+
+### 7. Memory-Mapped Loading ([`convert_to_quant/utils/memory_efficient_loader.py`](convert_to_quant/utils/memory_efficient_loader.py))
+Zero-copy tensor loading via memory mapping.
+- `MemoryMappedTensorLoader` - Direct file mapping
+- `UnifiedSafetensorsLoader` - Unified interface with optional mmap
+- ~50% memory reduction for large models
+
+### 8. BF16 Compute Mode ([`convert_to_quant/constants.py`](convert_to_quant/constants.py))
+Half-precision computation on Ampere+ GPUs (RTX 30 series, A100, etc.).
+- 2× memory savings for large tensor operations
+- Automatic detection of BF16 support
+- Per-operation threshold configuration
 
 ---
 
@@ -190,6 +274,158 @@ convert_to_quant -i model.safetensors --scaling-mode axis --comfy_quant
 convert_to_quant -i model.safetensors --scaling-mode tensor --comfy_quant
 ```
 
+### QuIP Storage Options
+
+By default, QuIP stores weights in **original space** with a single global scale for maximum compatibility:
+
+```bash
+# Default: Standard int8_tensorwise format (recommended)
+convert_to_quant -i model.safetensors --optimizer quip --comfy_quant
+```
+
+**Benefits of original space storage:**
+- Full compatibility with Z-Image, ComfyUI, and standard inference pipelines
+- Maximum inference performance (no inverse transform overhead)
+- Uses optimized hardware INT8 kernels
+
+For advanced use cases, you can store weights in **transformed space** (experimental):
+
+```bash
+# Experimental: Store in transformed space (requires custom loader)
+convert_to_quant -i model.safetensors --optimizer quip --comfy_quant --quip-store-transformed
+```
+
+**When to use transformed storage:**
+- When implementing a custom loader that can apply inverse transforms during inference
+- For experimental research purposes
+- Note: Not compatible with standard inference pipelines
+
+### Memory-Efficient Loading
+
+The `UnifiedSafetensorsLoader` provides a unified interface for loading safetensors files with optional streaming support:
+
+```bash
+# Low-memory streaming mode - loads tensors on-demand
+convert_to_quant -i model.safetensors --comfy_quant --low-memory
+
+# Standard mode (default) - preloads all tensors for faster processing
+convert_to_quant -i model.safetensors --comfy_quant
+```
+
+**When to use low-memory mode:**
+- Quantizing very large models that don't fit in system RAM
+- Running on machines with limited memory
+- Processing models alongside other memory-intensive applications
+
+**Mode comparison:**
+
+| Mode | Memory Usage | Speed | Use Case |
+|------|--------------|-------|----------|
+| Standard | ~2x model size | Fast | Recommended for most users |
+| Low-memory | ~1x model size + 1 tensor | Slower | Limited RAM environments |
+
+### Streaming Modes
+
+The quantizer provides several streaming modes for memory-efficient processing:
+
+```bash
+# Auto-detect based on GPU VRAM (recommended)
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=auto
+
+# Balanced approach (default)
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=balanced
+
+# Aggressive CPU offloading (maximum memory safety)
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=aggressive
+
+# Minimal offloading (for 12-16GB VRAM)
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=minimal
+
+# Disable streaming (requires 24GB+ VRAM)
+convert_to_quant -i model.safetensors --comfy_quant --streaming-mode=off
+```
+
+**Streaming Mode Comparison:**
+
+| Mode | Hadamard Threshold | Behavior | Use Case |
+|------|-------------------|----------|----------|
+| `off` | ∞ (infinity) | Never offload to CPU | Workstations with 24GB+ VRAM |
+| `minimal` | 100M elements (~400MB) | Conservative offloading | 12-16GB VRAM |
+| `balanced` | 50M elements (~200MB) | Moderate offloading | 8-12GB VRAM |
+| `aggressive` | 25M elements (~100MB) | Aggressive offloading | <8GB VRAM or maximum safety |
+| `auto` | Adaptive | Detects based on VRAM | Recommended default |
+
+### BF16 Compute Mode
+
+Enable BF16 compute on Ampere+ GPUs (RTX 30 series, A100, etc.) for 2× memory savings:
+
+```bash
+# Auto-enable for large tensors (default)
+convert_to_quant -i model.safetensors --comfy_quant --bf16-compute=auto
+
+# Force BF16 for all supported operations
+convert_to_quant -i model.safetensors --comfy_quant --bf16-compute=on
+
+# Disable BF16, use FP32 only
+convert_to_quant -i model.safetensors --comfy_quant --bf16-compute=off
+```
+
+**BF16 with Custom Thresholds:**
+
+```bash
+# Adjust tensor size thresholds for BF16 (in elements)
+convert_to_quant -i model.safetensors --comfy_quant \
+    --bf16-compute=auto \
+    --bf16-threshold 1000000 \
+    --bf16-hadamard-threshold 500000 \
+    --bf16-hessian-threshold 1000000
+```
+
+**Recommended for:**
+- 8GB GPUs: `--streaming-mode=aggressive --bf16-compute=on`
+- 12GB GPUs: `--streaming-mode=balanced --bf16-compute=on`
+- 16GB+ GPUs: `--streaming-mode=auto --bf16-compute=on`
+
+### Checkpointed Quantization
+
+For extreme memory savings on large layers (75-90% reduction):
+
+```bash
+# Enable checkpointed quantization with default settings
+convert_to_quant -i model.safetensors --comfy_quant --optimizer quip --quip-checkpointed
+
+# Custom threshold and segments
+convert_to_quant -i model.safetensors --comfy_quant --optimizer quip \
+    --quip-checkpointed \
+    --quip-checkpoint-threshold 8192 \
+    --quip-checkpoint-segments 4
+```
+
+**Options:**
+- `--quip-checkpointed` - Enable checkpointed LDLQ quantization
+- `--quip-checkpoint-threshold` - Dimension threshold (default: 8192)
+- `--quip-checkpoint-segments` - Number of segments (default: 4, higher = more memory savings but slower)
+
+### No Memory Limits Mode
+
+Disable all memory safety checks for maximum performance (use with caution):
+
+```bash
+# Maximum speed, no safety checks (requires 24GB+ VRAM)
+convert_to_quant -i model.safetensors --comfy_quant --no-memory-limits
+```
+
+**Warning:** This disables ALL memory protection:
+- Pre-emptive memory checking (OOMGuard)
+- Adaptive threshold adjustments
+- Automatic CPU fallback when VRAM is low
+- OOM recovery and learning from OOM events
+
+**Only use when:**
+- You have abundant VRAM (24GB+) where OOM is unlikely
+- Performance is critical and CPU fallback is unacceptable
+- Debugging to isolate OOM handling slowdowns
+
 ### Quality Reporting & Calibration
 
 ```bash
@@ -202,6 +438,26 @@ convert_to_quant -i model.safetensors --optimizer quip --calibration-lora my_lor
 
 ---
 
+## LoRA Merging
+
+Merge LoRA weights directly into the base model before quantization for a single unified quantized file:
+
+```bash
+# Merge single LoRA
+convert_to_quant -i model.safetensors --merge-lora my_lora.safetensors --comfy_quant
+
+# Merge multiple LoRAs with automatic dampening
+convert_to_quant -i model.safetensors --merge-loras lora1.safetensors lora2.safetensors --comfy_quant
+
+# Adjust merge scale (default: 1.0)
+convert_to_quant -i model.safetensors --merge-lora my_lora.safetensors --merge-lora-scale 0.8 --comfy_quant
+```
+
+**Benefits:**
+- Single file deployment - No separate LoRA loading at inference time
+- Faster inference - No runtime LoRA computation overhead
+- Better quantization quality - Optimizers can work with the merged weights
+
 ## LoRA Compatibility
 
 For the best results when using LoRAs with quantized models:
@@ -210,7 +466,6 @@ For the best results when using LoRAs with quantized models:
 - **LoRA-Informed Calibration**: If you have a specific LoRA you want to optimize for, use the `--calibration-lora` flag. This uses the LoRA's weight directions to inform the quantization process for that specific LoRA.
 
 ---
-
 
 ## Requirements
 

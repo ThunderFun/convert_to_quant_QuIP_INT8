@@ -17,6 +17,97 @@ from ..utils.tensor_utils import adaptive_lr_update
 from ..pinned_transfer import transfer_to_gpu_pinned
 
 
+class CudaGraphRunner:
+    """
+    CUDA Graph capture and replay utility for optimization loops.
+    
+    Captures GPU operations into a graph for efficient replay,
+    eliminating CPU launch overhead in iterative optimization.
+    """
+    
+    def __init__(self, warmup_iters: int = 3):
+        self.graph = None
+        self.static_inputs = []
+        self.static_outputs = []
+        self.warmup_iters = warmup_iters
+        self.is_captured = False
+        
+    def capture_graph(self, model_fn, sample_inputs):
+        """
+        Capture a CUDA graph for the given model function.
+        
+        Args:
+            model_fn: Callable that performs GPU operations
+            sample_inputs: List of input tensors for tracing
+            
+        Returns:
+            Tuple of (graph, static_inputs, static_outputs)
+        """
+        if not torch.cuda.is_available():
+            return None, sample_inputs, None
+            
+        # Warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(self.warmup_iters):
+                model_fn(*sample_inputs)
+        torch.cuda.current_stream().wait_stream(s)
+        
+        # Capture
+        self.static_inputs = sample_inputs
+        self.graph = torch.cuda.CUDAGraph()
+        
+        with torch.cuda.graph(self.graph):
+            self.static_outputs = model_fn(*sample_inputs)
+            if not isinstance(self.static_outputs, (tuple, list)):
+                self.static_outputs = (self.static_outputs,)
+                
+        self.is_captured = True
+        return self.graph, self.static_inputs, self.static_outputs
+    
+    def replay(self, inputs=None):
+        """
+        Replay the captured graph.
+        
+        Args:
+            inputs: Optional new inputs (must match captured shapes)
+            
+        Returns:
+            Static outputs from graph replay
+        """
+        if not self.is_captured:
+            raise RuntimeError("Graph not captured. Call capture_graph first.")
+            
+        if inputs is not None:
+            # Copy new inputs to static input buffers
+            for static_inp, new_inp in zip(self.static_inputs, inputs):
+                static_inp.copy_(new_inp)
+                
+        self.graph.replay()
+        return self.static_outputs
+
+
+def maybe_use_cuda_graphs(enable: bool = True):
+    """
+    Decorator factory to optionally wrap optimization with CUDA graphs.
+    
+    Usage:
+        @maybe_use_cuda_graphs(enable=True)
+        def optimize_loop(...):
+            ...
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            if not enable or not torch.cuda.is_available():
+                return func(*args, **kwargs)
+            # CUDA graph logic would be integrated here
+            # For now, just pass through
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
 class BaseLearnedConverter(ABC):
     """
     Abstract base class for learned rounding quantization converters.

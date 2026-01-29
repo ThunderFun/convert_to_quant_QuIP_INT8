@@ -21,7 +21,8 @@ class GPTQInt8Converter:
         actorder: bool = False,
         use_triton: bool = False,
         lazy_updates: bool = True,
-        low_memory: bool = False
+        low_memory: bool = False,
+        streaming: bool = False,
     ):
         self.block_size = block_size if block_size is not None else 128
         self.percdamp = percdamp  # Hessian damping factor
@@ -30,6 +31,7 @@ class GPTQInt8Converter:
         self.use_triton = use_triton
         self.lazy_updates = lazy_updates
         self.low_memory = low_memory
+        self.streaming = streaming
         
         # Pre-allocated buffers for memory optimization
         self._q_buffer = None
@@ -138,7 +140,16 @@ class GPTQInt8Converter:
                     # Batched update for remaining columns in block
                     if end_j < count:
                         update_factors = Hinv_block[j:end_j, end_j:]
-                        W_block[:, end_j:] -= err_batch @ update_factors
+                        # BF16 optimization for error updates
+                        from ..constants import should_use_bf16_for_op
+                        use_bf16 = should_use_bf16_for_op(err_batch.numel() * update_factors.numel(), "matmul")
+                        if use_bf16:
+                            device_type = 'cuda' if err_batch.is_cuda else 'cpu'
+                            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                                update = err_batch @ update_factors
+                            W_block[:, end_j:] -= update.float()
+                        else:
+                            W_block[:, end_j:] -= err_batch @ update_factors
             else:
                 # Original sequential processing
                 for j in range(count):
@@ -160,7 +171,16 @@ class GPTQInt8Converter:
                 
             Q[:, i1:i2] = Q_block
             if i2 < N:
-                W[:, i2:] -= Err_block @ Hinv[i1:i2, i2:]
+                # BF16 optimization for block error updates
+                from ..constants import should_use_bf16_for_op
+                use_bf16 = should_use_bf16_for_op(Err_block.numel() * Hinv[i1:i2, i2:].numel(), "matmul")
+                if use_bf16:
+                    device_type = 'cuda' if Err_block.is_cuda else 'cpu'
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        update = Err_block @ Hinv[i1:i2, i2:]
+                    W[:, i2:] -= update.float()
+                else:
+                    W[:, i2:] -= Err_block @ Hinv[i1:i2, i2:]
             
             # Periodic cleanup (only in low_memory mode to save time)
             if self.low_memory and i1 % (self.block_size * 5) == 0:

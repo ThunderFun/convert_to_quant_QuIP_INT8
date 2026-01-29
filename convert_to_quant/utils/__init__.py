@@ -29,6 +29,45 @@ from .hadamard import (
     hadamard_matrix,
     fast_hadamard_transform,
     random_orthogonal_matrix,
+    fast_hadamard_transform_chunked,
+    fast_hadamard_transform_2d_chunked,
+    fast_hadamard_transform_2d_chunked_with_signs,
+)
+from .memory_utils import (
+    OOMGuard,
+    should_use_cpu_for_hadamard,
+    should_use_cpu_for_ldlq,
+    should_use_cpu_for_hessian,
+    format_bytes,
+    set_no_memory_limits,
+)
+from .pinned_pool import (
+    PinnedMemoryPool,
+    get_pinned_pool,
+    transfer_with_pool,
+    clear_pinned_pool,
+    get_pinned_pool_stats,
+)
+from .buffer_pool import (
+    LDLQBufferPool,
+    get_buffer_pool,
+    clear_buffer_pool,
+    get_buffer_pool_stats,
+)
+from .checkpointed_quant import (
+    checkpointed_ldlq,
+    CheckpointedQuantizer,
+    estimate_checkpointed_memory,
+)
+from .async_prefetch import (
+    AsyncLayerLoader,
+    BatchedAsyncLoader,
+    PrefetchStats,
+    create_async_loader,
+)
+from .tensor_prefetch import (
+    AsyncTensorPrefetcher,
+    TensorPrefetchStats,
 )
 
 __all__ = [
@@ -55,4 +94,31 @@ __all__ = [
     "hadamard_matrix",
     "fast_hadamard_transform",
     "random_orthogonal_matrix",
+    "fast_hadamard_transform_chunked",
+    "fast_hadamard_transform_2d_chunked",
+    "fast_hadamard_transform_2d_chunked_with_signs",
+    "OOMGuard",
+    "should_use_cpu_for_hadamard",
+    "should_use_cpu_for_ldlq",
+    "should_use_cpu_for_hessian",
+    "format_bytes",
+    "set_no_memory_limits",
+    "PinnedMemoryPool",
+    "get_pinned_pool",
+    "transfer_with_pool",
+    "clear_pinned_pool",
+    "get_pinned_pool_stats",
+    "LDLQBufferPool",
+    "get_buffer_pool",
+    "clear_buffer_pool",
+    "get_buffer_pool_stats",
+    "checkpointed_ldlq",
+    "CheckpointedQuantizer",
+    "estimate_checkpointed_memory",
+    "AsyncLayerLoader",
+    "BatchedAsyncLoader",
+    "PrefetchStats",
+    "create_async_loader",
+    "AsyncTensorPrefetcher",
+    "TensorPrefetchStats",
 ]
