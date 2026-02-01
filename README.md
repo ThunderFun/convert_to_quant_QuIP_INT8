@@ -65,7 +65,7 @@ convert_to_quant -i model.safetensors --optimizer quip --comfy_quant
 ```
 
 > **Default Format:** QuIP uses uses **tensor-wise scaling** by default (`--quip-requant-scheme tensor`) which produces standard `int8_tensorwise` format. This provides:
-> - Maximum compatibility with ComfyUI and standard inference pipelines
+> - Maximum compatibility with [ComfyUI](https://github.com/ThunderFun/ComfyUI-Wan-INT8) and standard inference pipelines
 > - Single global scale per weight matrix (scalar)
 >
 > **For potentially higher precision** (at the cost of compatibility): Use `--quip-requant-scheme block` to enable block-wise re-quantization.
