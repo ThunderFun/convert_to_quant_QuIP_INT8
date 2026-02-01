@@ -1,0 +1,30 @@
+{
+  "_comment": "Example LoRA mapping file for batch_quantize.py",
+  "_description": "Maps model filenames to their corresponding LoRA files. Supports single LoRA (string) or multiple LoRAs (list).",
+  
+  "flux1-dev.safetensors": "/path/to/loras/flux_style_lora.safetensors",
+  
+  "flux1-schnell.safetensors": [
+    "/path/to/loras/flux_character_lora.safetensors",
+    "/path/to/loras/flux_lighting_lora.safetensors",
+    "/path/to/loras/flux_style_lora.safetensors"
+  ],
+
+    "flux1-schnell.safetensors": [
+    "/path/to/loras/flux_character_lora.safetensors",
+    "/path/to/loras/flux_lighting_lora.safetensors",
+    "/path/to/loras/flux_style_lora.safetensors"
+  ],
+  
+  "sdxl_base.safetensors": "/path/to/loras/sdxl_enhancer.safetensors",
+  
+  "_notes": [
+    "Keys can be full filenames or base names (without extension)",
+    "Values can be:",
+    "  - A single string path for one LoRA",
+    "  - A list of paths for multiple LoRAs (merged in order)",
+    "If using --lora-dir, you can omit the path and just provide the LoRA filename",
+    "Pattern matching is supported - partial matches will be tried if exact match fails",
+    "Multiple LoRAs are merged with dampening: each additional LoRA is scaled by 0.9^n"
+  ]
+}
