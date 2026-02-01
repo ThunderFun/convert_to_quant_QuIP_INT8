@@ -33,7 +33,18 @@ def find_lora_for_model(model_path: str, mapping: dict, lora_dir: str = None) ->
     for pattern, lora_entry in mapping.items():
         if pattern.startswith("_"):  # Skip metadata keys
             continue
-        if pattern in model_name or pattern in model_base:
+        
+        # Use more robust matching: check if pattern is a substring of the base name
+        # but avoid partial matches like 'model_1' matching 'model_10'
+        if pattern == model_base or pattern == model_name:
+            return lora_entry if isinstance(lora_entry, list) else [lora_entry]
+            
+        # Pattern matching with delimiters
+        import re
+        escaped_pattern = re.escape(pattern)
+        # Match pattern as a whole word or delimited by _ or . or -
+        regex = f"(^|[._-]){escaped_pattern}([._-]|$)"
+        if re.search(regex, model_base) or re.search(regex, model_name):
             return lora_entry if isinstance(lora_entry, list) else [lora_entry]
     
     # If lora_dir is specified, look for matching LoRA by name
@@ -83,12 +94,11 @@ LoRA Merging Examples:
     # We want to allow passing any other arguments to the underlying script
     args, unknown = parser.parse_known_args()
 
-    if ("-o" in unknown or "--output" in unknown) and not args.dry_run_batch:
-        print("Warning: You have specified an output path with -o/--output.")
-        print("In batch mode, this will cause all models to be saved to the SAME file, overwriting each other.")
-        print("It is recommended to omit -o/--output to let the script generate unique filenames.")
-        # In non-interactive environments, we might want to proceed or abort.
-        # For safety, let's just print a strong warning.
+    if ("-o" in unknown or "--output" in unknown):
+        print("Error: You have specified an output path with -o/--output.")
+        print("In batch mode, this would cause all models to be saved to the SAME file, overwriting each other.")
+        print("Please omit -o/--output to let the script generate unique filenames based on input names.")
+        sys.exit(1)
 
     input_files = []
     if args.inputs:
@@ -143,14 +153,10 @@ LoRA Merging Examples:
     peek_parser.add_argument("--heur", action="store_true")
     peek_parser.add_argument("--fp16", action="store_true")
     peek_parser.add_argument("--streaming-mode", type=str, default="balanced")
-    peek_parser.add_argument("--quip-actorder", action="store_false", default=True) # default is True in main.py
-    peek_parser.add_argument("--no-quip-actorder", action="store_true") # handle potential negation if it existed, but main.py doesn't have it.
-    # Actually main.py has: parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP.")
-    # Wait, if action="store_true" and default=True, then it's always True unless... wait.
-    # In argparse, if default=True and action="store_true", it's always True. That's usually a bug in the parser definition if they wanted a way to disable it.
-    # Looking at main.py:
-    # parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP.")
-    # This means it's always True.
+    peek_parser.add_argument("--quip-actorder", action="store_true", default=True)
+    peek_parser.add_argument("--no-quip-actorder", action="store_false", dest="quip_actorder")
+    peek_parser.add_argument("--quip-hadamard", action="store_true", default=True)
+    peek_parser.add_argument("--no-quip-hadamard", action="store_false", dest="quip_hadamard")
     
     peek_args, _ = peek_parser.parse_known_args(unknown)
     
@@ -171,8 +177,8 @@ LoRA Merging Examples:
     
     # Check for QuIP/GPTQ specific flags that are enabled by default or explicitly
     if peek_args.optimizer == "quip":
-        flags.append("QuIP ActOrder (Enabled)")
-        flags.append("QuIP Hadamard (Enabled)")
+        if peek_args.quip_actorder: flags.append("QuIP ActOrder")
+        if peek_args.quip_hadamard: flags.append("QuIP Hadamard")
     elif peek_args.optimizer == "gptq":
         flags.append("GPTQ Fast (Enabled)")
         if "--gptq-actorder" in unknown: flags.append("GPTQ ActOrder")

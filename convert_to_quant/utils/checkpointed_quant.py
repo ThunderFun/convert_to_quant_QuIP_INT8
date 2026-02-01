@@ -15,6 +15,8 @@ from torch import Tensor
 from typing import Optional, Callable
 from tqdm import tqdm
 
+from .memory_utils import maybe_empty_cache
+
 
 def checkpointed_ldlq(
     W: Tensor,
@@ -134,13 +136,13 @@ def checkpointed_ldlq(
             # Clean up
             del Err_seg
             if device.type == 'cuda':
-                torch.cuda.empty_cache()
+                maybe_empty_cache(pressure_threshold=0.85)
         
         # Clean up segment data
         del W_seg, H_diag, Q_seg
         # BF16 OPTIMIZATION: Less frequent cleanup when BF16 is available
         if device.type == 'cuda' and seg_idx % cleanup_interval == 0:
-            torch.cuda.empty_cache()
+            maybe_empty_cache(pressure_threshold=0.85)
     
     return Q_full
 
@@ -165,8 +167,8 @@ def _ldlq_segment(
     W_work = W_seg.clone()
     
     # Process in blocks
-    pbar = tqdm(range(0, seg_cols, block_size), 
-                desc=f"  Seg {seg_idx+1}/{total_segments}", 
+    pbar = tqdm(range(0, seg_cols, block_size),
+                desc=f"  Seg {seg_idx+1}/{total_segments}",
                 leave=False)
     
     for i1 in pbar:
@@ -185,7 +187,22 @@ def _ldlq_segment(
         if i2 < seg_cols:
             Err_block = _compute_block_error(W_block, Q_block, H_block, scale)
             update_slice = H_diag[i1:i2, i2:]
-            W_work[:, i2:] -= Err_block @ update_slice
+            
+            # TILED UPDATE: Process remaining columns in segment in chunks to save memory
+            # This ensures we never have a massive intermediate tensor for the update
+            rem_cols = seg_cols - i2
+            chunk_size = 1024
+            for c_start in range(0, rem_cols, chunk_size):
+                c_end = min(c_start + chunk_size, rem_cols)
+                # W_work[:, i2+c_start:i2+c_end] -= Err_block @ update_slice[:, c_start:c_end]
+                torch.addmm(
+                    W_work[:, i2+c_start:i2+c_end],
+                    Err_block,
+                    update_slice[:, c_start:c_end],
+                    alpha=-1,
+                    out=W_work[:, i2+c_start:i2+c_end]
+                )
+            del Err_block
     
     return Q_seg
 
@@ -221,6 +238,9 @@ def _compute_block_error(
     """
     # Get diagonal of H
     d = torch.diag(H_block).float()
+    
+    # Avoid division by zero - clamp diagonal to minimum value
+    d = torch.clamp(d, min=1e-12)
     
     # Dequantize
     if scale.numel() == 1:
@@ -293,16 +313,16 @@ def _apply_error_streaming(
         if H_coupling.device != device:
             H_coupling = H_coupling.to(device)
         
-        # Apply error update
+        # Apply error update in-place to eliminate temporary update tensor
         # Err_seg: (M, seg_cols), H_coupling: (seg_cols, chunk_cols)
-        # Result: (M, chunk_cols)
-        update = Err_seg @ H_coupling
-        W[:, rem_start:rem_end] -= update
+        # We use addmm_ with alpha=-1 to perform W -= Err_seg @ H_coupling in-place
+        # Note: addmm_ requires the output tensor to be the first argument
+        torch.addmm(W[:, rem_start:rem_end], Err_seg, H_coupling, alpha=-1, out=W[:, rem_start:rem_end])
         
         # Clean up
-        del H_coupling, update
+        del H_coupling
         if device.type == 'cuda':
-            torch.cuda.empty_cache()
+            maybe_empty_cache(pressure_threshold=0.90)
 
 
 class CheckpointedQuantizer:

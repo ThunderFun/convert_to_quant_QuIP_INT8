@@ -117,6 +117,14 @@ class LDLQBufferPool:
             >>> print(q_buf.shape)  # torch.Size([4096, 128])
             >>> print(w_buf.shape)  # torch.Size([4096, 4096])
         """
+        # Validate dimensions - zero dimensions indicate an upstream issue
+        if M <= 0:
+            raise ValueError(f"Number of rows (M) must be positive, got {M}")
+        if N <= 0:
+            raise ValueError(f"Number of columns (N) must be positive, got {N}")
+        if block_size <= 0:
+            raise ValueError(f"Block size must be positive, got {block_size}")
+        
         key = self._make_key(M, N, block_size, device)
         
         with self._lock:
@@ -127,8 +135,8 @@ class LDLQBufferPool:
                 self._buffers[key] = entry
                 
                 # Return slices of the cached buffers
-                q_buf = entry['q'][:, :block_size]
-                err_buf = entry['err'][:, :block_size]
+                q_buf = entry['q'][:M, :block_size]
+                err_buf = entry['err'][:M, :block_size]
                 W_buf = entry['W'][:M, :N]
                 return q_buf, err_buf, W_buf
             
@@ -137,16 +145,27 @@ class LDLQBufferPool:
         # Cache miss - create new buffers with rounded sizes
         M_r, N_r, block_r = self._round_dims(M, N, block_size)
         
+        # Use pinned memory for CPU buffers to accelerate transfers
+        pin_memory = (str(device) == 'cpu' and torch.cuda.is_available())
+        
         try:
-            q_buffer = torch.empty(M_r, block_r, dtype=torch.int8, device=device)
-            err_buffer = torch.empty(M_r, block_r, dtype=torch.float32, device=device)
-            W_buffer = torch.empty(M_r, N_r, dtype=torch.float32, device=device)
-        except RuntimeError as e:
-            # If allocation fails, try with exact sizes
-            q_buffer = torch.empty(M, block_size, dtype=torch.int8, device=device)
-            err_buffer = torch.empty(M, block_size, dtype=torch.float32, device=device)
-            W_buffer = torch.empty(M, N, dtype=torch.float32, device=device)
-            M_r, N_r, block_r = M, N, block_size
+            q_buffer = torch.empty(M_r, block_r, dtype=torch.int8, device=device, pin_memory=pin_memory)
+            err_buffer = torch.empty(M_r, block_r, dtype=torch.float32, device=device, pin_memory=pin_memory)
+            W_buffer = torch.empty(M_r, N_r, dtype=torch.float32, device=device, pin_memory=pin_memory)
+        except (RuntimeError, TypeError) as e:
+            # If allocation fails or pin_memory is not supported, try with exact sizes and no pinning
+            # First, try to reclaim memory if on CUDA
+            if str(device) != 'cpu' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            try:
+                q_buffer = torch.empty(M, block_size, dtype=torch.int8, device=device)
+                err_buffer = torch.empty(M, block_size, dtype=torch.float32, device=device)
+                W_buffer = torch.empty(M, N, dtype=torch.float32, device=device)
+                M_r, N_r, block_r = M, N, block_size
+            except Exception:
+                # Re-raise the original error if fallback also fails
+                raise e
         
         # Calculate allocation size for statistics
         alloc_mb = (
@@ -175,7 +194,7 @@ class LDLQBufferPool:
             self._buffers[key] = entry
         
         # Return slices
-        return q_buffer[:, :block_size], err_buffer[:, :block_size], W_buffer[:M, :N]
+        return q_buffer[:M, :block_size], err_buffer[:M, :block_size], W_buffer[:M, :N]
     
     def release_buffers(
         self, 

@@ -43,6 +43,7 @@ class GPTQInt8Converter:
             self._q_buffer = torch.empty(M, block_size, dtype=torch.int8, device=self.device)
             self._err_buffer = torch.empty(M, block_size, dtype=torch.float32, device=self.device)
 
+    @torch.no_grad()
     def convert(self, weight: Tensor, H: Optional[Tensor] = None) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Quantize weight using GPTQ-style sequential optimization.
@@ -102,9 +103,23 @@ class GPTQInt8Converter:
         # For simplicity and compatibility with our INT8 format, 
         # let's compute a global scale first or per-block.
         
-        # Let's do per-tensor scale for now to match the sketch, 
+        # Let's do per-tensor scale for now to match the sketch,
         # but we can adapt it to block-wise.
-        abs_max = W.abs().max()
+        
+        # Check if outlier-aware scaling is enabled
+        from ..config.optimization_config import get_optimization_config
+        opt_config = get_optimization_config()
+        
+        if opt_config.enable_outlier_aware_scaling and opt_config.outlier_percentile <= 1.0:
+            # Use percentile to ignore extreme outliers for better quantization
+            percentile = opt_config.outlier_percentile
+            # quantile() doesn't support BFloat16, so we must convert to float
+            abs_max = W.abs().float().quantile(percentile).to(W.dtype)
+            debug(f"Using outlier-aware scaling: {percentile*100:.1f}th percentile")
+        else:
+            # Standard max-based scaling
+            abs_max = W.abs().max()
+        
         scale = (abs_max / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
         
         pbar = tqdm(range(0, N, self.block_size), desc="    GPTQ Quantizing", leave=False)

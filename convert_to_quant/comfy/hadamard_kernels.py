@@ -270,35 +270,28 @@ def triton_hadamard_transform(
     # This check MUST happen before any modifications to x
     inplace_requested = output is not None and output.data_ptr() == x.data_ptr()
     
-    # Ensure contiguous memory layout
-    if inplace_requested:
-        # For true in-place: copy to output if x is not contiguous, then use output as working buffer
-        if not x.is_contiguous():
-            output.copy_(x)
-        x = output
+    # We always need a contiguous buffer for Triton's raw pointer arithmetic.
+    # If x is not contiguous, we must make a contiguous copy.
+    # If we are not doing in-place, we must also make a copy to avoid modifying input.
+    if not x.is_contiguous() or not inplace_requested:
+        buf_a = x.contiguous()
+        if not inplace_requested:
+            # If not in-place, buf_a is already a fresh copy from .contiguous()
+            # but if it was already contiguous, .contiguous() returns self, so we clone.
+            if buf_a.data_ptr() == x.data_ptr():
+                buf_a = buf_a.clone()
     else:
-        # Not in-place: clone to avoid modifying the input tensor
-        # This creates our working buffer
-        x = x.contiguous().clone()
+        # Contiguous and in-place requested
+        buf_a = x
     
-    # Determine output tensor
+    # buf_b is the other ping-pong buffer. It must be contiguous.
+    buf_b = torch.empty_like(buf_a)
+    
+    # Determine final output destination
     if output is None:
-        out = torch.empty_like(x)
+        out = torch.empty_like(buf_a)
     else:
         out = output
-    
-    # We need two buffers for ping-pong
-    # If user wants in-place, we use x and a temp buffer
-    # Otherwise, we use x and out as the two buffers
-    if inplace_requested:
-        # True in-place: need a temporary buffer (we already have x as working buffer)
-        temp = torch.empty_like(x)
-        buf_a = x
-        buf_b = temp
-    else:
-        # Not in-place: use input clone and output as the two buffers
-        buf_a = x
-        buf_b = out
     
     log_n = int(math.log2(n))
     BLOCK_SIZE = min(n, 2048)
@@ -318,36 +311,55 @@ def triton_hadamard_transform(
             stage=stage,
         )
     
+    # The final result is in the buffer from the last stage
+    if (log_n - 1) % 2 == 0:
+        final_buf = buf_b
+    else:
+        final_buf = buf_a
+    
     # Apply normalization if requested
     if normalize:
-        # The final result is in the buffer from the last stage
-        if (log_n - 1) % 2 == 0:
-            final_buf = buf_b
-        else:
-            final_buf = buf_a
-        
         scale = 1.0 / math.sqrt(n)
-        _hadamard_final_normalize_kernel[grid](
-            final_buf, out,
-            n=n,
-            scale=scale,
-            BLOCK_SIZE=BLOCK_SIZE,
-            num_stages=1,
-        )
-    else:
-        # Copy final result to output if needed
-        if (log_n - 1) % 2 == 0:
-            final_buf = buf_b
-        else:
-            final_buf = buf_a
-        
-        if final_buf.data_ptr() != out.data_ptr():
-            _copy_kernel[grid](
+        # If out is contiguous and same shape as final_buf, we can write directly
+        if out.is_contiguous() and out.shape == final_buf.shape:
+            _hadamard_final_normalize_kernel[grid](
                 final_buf, out,
                 n=n,
+                scale=scale,
                 BLOCK_SIZE=BLOCK_SIZE,
-                num_stages=1,
             )
+        else:
+            # Otherwise normalize into final_buf and then copy_ to out
+            _hadamard_final_normalize_kernel[grid](
+                final_buf, final_buf,
+                n=n,
+                scale=scale,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+            # Validate shapes are compatible before reshape to prevent runtime errors
+            if out.numel() != final_buf.numel():
+                raise ValueError(
+                    f"Output tensor numel {out.numel()} does not match buffer numel {final_buf.numel()}. "
+                    f"Shapes: out={out.shape}, final_buf={final_buf.shape}"
+                )
+            out.copy_(final_buf.reshape(out.shape))
+    else:
+        # No normalization, just ensure result is in 'out'
+        if out.data_ptr() != final_buf.data_ptr():
+            if out.is_contiguous() and out.shape == final_buf.shape:
+                _copy_kernel[grid](
+                    final_buf, out,
+                    n=n,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                )
+            else:
+                # Validate shapes are compatible before reshape to prevent runtime errors
+                if out.numel() != final_buf.numel():
+                    raise ValueError(
+                        f"Output tensor numel {out.numel()} does not match buffer numel {final_buf.numel()}. "
+                        f"Shapes: out={out.shape}, final_buf={final_buf.shape}"
+                    )
+                out.copy_(final_buf.reshape(out.shape))
     
     return out
 
@@ -382,35 +394,28 @@ def triton_hadamard_transform_with_signs(
     # This check MUST happen before any modifications to x
     inplace_requested = output is not None and output.data_ptr() == x.data_ptr()
     
-    # Ensure contiguous memory layout
-    if inplace_requested:
-        # For true in-place: copy to output if x is not contiguous, then use output as working buffer
-        if not x.is_contiguous():
-            output.copy_(x)
-        x = output
+    # We always need a contiguous buffer for Triton's raw pointer arithmetic.
+    # If x is not contiguous, we must make a contiguous copy.
+    # If we are not doing in-place, we must also make a copy to avoid modifying input.
+    if not x.is_contiguous() or not inplace_requested:
+        buf_a = x.contiguous()
+        if not inplace_requested:
+            # If not in-place, buf_a is already a fresh copy from .contiguous()
+            # but if it was already contiguous, .contiguous() returns self, so we clone.
+            if buf_a.data_ptr() == x.data_ptr():
+                buf_a = buf_a.clone()
     else:
-        # Not in-place: clone to avoid modifying the input tensor
-        # This creates our working buffer
-        x = x.contiguous().clone()
+        # Contiguous and in-place requested
+        buf_a = x
     
-    # Determine output tensor
+    # buf_b is the other ping-pong buffer. It must be contiguous.
+    buf_b = torch.empty_like(buf_a)
+    
+    # Determine final output destination
     if output is None:
-        out = torch.empty_like(x)
+        out = torch.empty_like(buf_a)
     else:
         out = output
-    
-    # We need two buffers for ping-pong
-    # If user wants in-place, we use x and a temp buffer
-    # Otherwise, we use x and out as the two buffers
-    if inplace_requested:
-        # True in-place: need a temporary buffer (we already have x as working buffer)
-        temp = torch.empty_like(x)
-        buf_a = x
-        buf_b = temp
-    else:
-        # Not in-place: use input clone and output as the two buffers
-        buf_a = x
-        buf_b = out
     
     log_n = int(math.log2(n))
     BLOCK_SIZE = min(n, 2048)
@@ -436,37 +441,57 @@ def triton_hadamard_transform_with_signs(
             HAS_ROW_SIGNS=HAS_ROW_SIGNS,
             HAS_COL_SIGNS=HAS_COL_SIGNS,
             APPLY_SIGNS=(stage == 0),
-            num_stages=1,
         )
+    
+    # The final result is in the buffer from the last stage
+    if (log_n - 1) % 2 == 0:
+        final_buf = buf_b
+    else:
+        final_buf = buf_a
     
     # Apply normalization and copy to output if needed
     if normalize:
-        if (log_n - 1) % 2 == 0:
-            final_buf = buf_b
-        else:
-            final_buf = buf_a
-        
         scale = 1.0 / math.sqrt(n)
-        _hadamard_final_normalize_kernel[grid](
-            final_buf, out,
-            n=n,
-            scale=scale,
-            BLOCK_SIZE=BLOCK_SIZE,
-            num_stages=1,
-        )
-    else:
-        if (log_n - 1) % 2 == 0:
-            final_buf = buf_b
-        else:
-            final_buf = buf_a
-        
-        if final_buf.data_ptr() != out.data_ptr():
-            _copy_kernel[grid](
+        # If out is contiguous and same shape as final_buf, we can write directly
+        if out.is_contiguous() and out.shape == final_buf.shape:
+            _hadamard_final_normalize_kernel[grid](
                 final_buf, out,
                 n=n,
+                scale=scale,
                 BLOCK_SIZE=BLOCK_SIZE,
-                num_stages=1,
             )
+        else:
+            # Otherwise normalize into final_buf and then copy_ to out
+            _hadamard_final_normalize_kernel[grid](
+                final_buf, final_buf,
+                n=n,
+                scale=scale,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+            # Validate shapes are compatible before reshape to prevent runtime errors
+            if out.numel() != final_buf.numel():
+                raise ValueError(
+                    f"Output tensor numel {out.numel()} does not match buffer numel {final_buf.numel()}. "
+                    f"Shapes: out={out.shape}, final_buf={final_buf.shape}"
+                )
+            out.copy_(final_buf.reshape(out.shape))
+    else:
+        # No normalization, just ensure result is in 'out'
+        if out.data_ptr() != final_buf.data_ptr():
+            if out.is_contiguous() and out.shape == final_buf.shape:
+                _copy_kernel[grid](
+                    final_buf, out,
+                    n=n,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                )
+            else:
+                # Validate shapes are compatible before reshape to prevent runtime errors
+                if out.numel() != final_buf.numel():
+                    raise ValueError(
+                        f"Output tensor numel {out.numel()} does not match buffer numel {final_buf.numel()}. "
+                        f"Shapes: out={out.shape}, final_buf={final_buf.shape}"
+                    )
+                out.copy_(final_buf.reshape(out.shape))
     
     return out
 

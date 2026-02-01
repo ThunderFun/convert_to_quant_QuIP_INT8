@@ -35,11 +35,16 @@ from .hadamard import (
 )
 from .memory_utils import (
     OOMGuard,
+    MemorySummary,
     should_use_cpu_for_hadamard,
     should_use_cpu_for_ldlq,
     should_use_cpu_for_hessian,
     format_bytes,
     set_no_memory_limits,
+    get_no_memory_limits,
+    memory_limits_disabled,
+    maybe_empty_cache,
+    synchronize_and_empty_cache,
 )
 from .pinned_pool import (
     PinnedMemoryPool,
@@ -98,11 +103,16 @@ __all__ = [
     "fast_hadamard_transform_2d_chunked",
     "fast_hadamard_transform_2d_chunked_with_signs",
     "OOMGuard",
+    "MemorySummary",
     "should_use_cpu_for_hadamard",
     "should_use_cpu_for_ldlq",
     "should_use_cpu_for_hessian",
     "format_bytes",
     "set_no_memory_limits",
+    "get_no_memory_limits",
+    "memory_limits_disabled",
+    "maybe_empty_cache",
+    "synchronize_and_empty_cache",
     "PinnedMemoryPool",
     "get_pinned_pool",
     "transfer_with_pool",

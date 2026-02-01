@@ -9,6 +9,7 @@ from ..utils.hadamard import (
     is_power_of_two,
     random_orthogonal_matrix,
 )
+from ..utils.memory_utils import maybe_empty_cache
 from ..comfy.hadamard_kernels import fast_hadamard_transform
 
 
@@ -43,6 +44,15 @@ class QuIPInt8Converter:
         use_checkpointed_ldlq: bool = False,
         checkpointed_ldlq_threshold: int = 8192,
         checkpoint_segments: int = 4,
+        requant_scheme: str = "tensor",  # "tensor" or "block"
+        requant_tensor_use_per_row_scale: bool = True,  # Use per-row scales for tensor-wise re-quantization
+        # QuIP Paper Improvements (Section 4)
+        use_diagonal_rescaling: bool = True,
+        use_frobenius_scaling: bool = True,
+        use_random_permutation: bool = True,
+        use_greedy_coordinate_descent: bool = False,
+        greedy_cd_iterations: int = 100,
+        frobenius_rho: float = 1.0,
     ):
         self.block_size = block_size
         self.percdamp = percdamp
@@ -58,6 +68,32 @@ class QuIPInt8Converter:
         self.use_learned_rounding = use_learned_rounding
         self.ldlq_iterations = ldlq_iterations
         self.store_transformed = store_transformed
+        self.requant_scheme = requant_scheme  # "tensor" or "block"
+        self.requant_tensor_use_per_row_scale = requant_tensor_use_per_row_scale
+        
+        # QuIP Paper Improvements (Section 4)
+        self.use_diagonal_rescaling = use_diagonal_rescaling
+        self.use_frobenius_scaling = use_frobenius_scaling
+        
+        # store_transformed=True returns weights in a transformed domain (e.g. Hadamard-QuIP)
+        # along with a limited set of metadata (currently sign vectors for Hadamard-QuIP).
+        # Diagonal rescaling requires D_tilde to invert, but D_tilde is not stored/returned.
+        # To keep the storage contract "stored weights can be reconstructed without extra metadata",
+        # we disable diagonal rescaling when storing transformed weights.
+        if store_transformed and self.use_diagonal_rescaling:
+            verbose(
+                "WARNING: store_transformed=True is incompatible with diagonal rescaling (D_tilde is not stored). "
+                "Disabling diagonal rescaling for this converter instance."
+            )
+            self.use_diagonal_rescaling = False
+        self.use_random_permutation = use_random_permutation
+        self.use_greedy_coordinate_descent = use_greedy_coordinate_descent
+        self.greedy_cd_iterations = greedy_cd_iterations
+        self.frobenius_rho = frobenius_rho
+        
+        # Store no_memory_limits flag (required for proper threshold handling)
+        self._no_memory_limits = no_memory_limits
+        
         # Keep original streaming_mode value intact for downstream checks
         self.streaming_mode = streaming_mode
         # Store a display name for logging purposes (doesn't affect logic)
@@ -71,79 +107,28 @@ class QuIPInt8Converter:
         
         # Handle "auto" mode - now uses adaptive streaming
         if streaming_mode == "auto":
-            # Detect base tier from VRAM
-            base_tier = StreamingConfig.auto_detect_tier()
-            # Apply threshold overrides to base tier before creating adaptive manager
-            # This allows custom base thresholds while maintaining adaptive behavior
-            base_thresholds = StreamingConfig.get_thresholds(base_tier)
-            
-            # Apply custom overrides to base thresholds (if provided)
-            if streaming_thresholds:
-                if streaming_thresholds.get("hadamard"):
-                    base_thresholds.hadamard_elements = streaming_thresholds["hadamard"]
-                if streaming_thresholds.get("hessian"):
-                    base_thresholds.hessian_dim = streaming_thresholds["hessian"]
-                if streaming_thresholds.get("ldlq"):
-                    base_thresholds.ldlq_dim = streaming_thresholds["ldlq"]
-                if streaming_thresholds.get("ortho"):
-                    base_thresholds.ortho_dim = streaming_thresholds["ortho"]
-            
-            # Create adaptive manager with customized base tier
-            self._adaptive_manager = AdaptiveStreamingManager(
-                base_tier=base_tier,
-                enable_adaptation=not no_memory_limits,
-                oom_recovery_enabled=not no_memory_limits,
-            )
-            # Override the base thresholds in the adaptive manager with our customized values
-            if streaming_thresholds:
-                self._adaptive_manager._base_thresholds = base_thresholds
-                self._adaptive_manager.reset_thresholds()  # Apply the new base values
-            
-            # Set display name for logging (original mode is preserved)
-            limits_status = "no-limits" if no_memory_limits else "adaptive"
-            self._streaming_mode_display = f"auto ({limits_status}, base={base_tier})"
-            # Get initial thresholds from adaptive manager
-            thresholds = self._adaptive_manager.get_all_thresholds()
-        else:
-            # Get base thresholds from tier
-            thresholds = StreamingConfig.get_thresholds(streaming_mode)
-            
-            # Apply custom overrides if provided (for non-auto modes)
-            if streaming_thresholds:
-                if streaming_thresholds.get("hadamard"):
-                    thresholds.hadamard_elements = streaming_thresholds["hadamard"]
-                if streaming_thresholds.get("hessian"):
-                    thresholds.hessian_dim = streaming_thresholds["hessian"]
-                if streaming_thresholds.get("ldlq"):
-                    thresholds.ldlq_dim = streaming_thresholds["ldlq"]
-                if streaming_thresholds.get("ortho"):
-                    thresholds.ortho_dim = streaming_thresholds["ortho"]
-        
-        self.hadamard_threshold = thresholds.hadamard_elements
-        self.ldlq_threshold = thresholds.ldlq_dim
-        self.hessian_threshold = thresholds.hessian_dim
-        self.ortho_threshold = thresholds.ortho_dim
-        
-        # When no_memory_limits is enabled, override all thresholds to infinity to disable CPU offloading
-        self._no_memory_limits = no_memory_limits
-        if no_memory_limits:
-            self.hadamard_threshold = float('inf')
-            self.ldlq_threshold = float('inf')
-            self.hessian_threshold = float('inf')
-            self.ortho_threshold = float('inf')
+            self._adaptive_manager = AdaptiveStreamingManager()
         
         # streaming_enabled is True for all modes except "off"
         self.streaming = streaming_mode != "off"
         
         # Cache for orthogonal matrices
         self._ortho_cache = {}
-        self.low_memory = False # Will be set by quantization.py
-
-        # Pre-allocated buffers for memory optimization
-        self._W_buffer = None
-        self._H_buffer = None
-        self._err_buffer = None
-        self._q_buffer = None
+        self.low_memory = False  # Will be set by quantization.py
+        
+        # Initialize thresholds (will be overridden by adaptive manager if in auto mode)
+        if self._no_memory_limits:
+            self.hadamard_threshold = float('inf')
+            self.ldlq_threshold = float('inf')
+            self.hessian_threshold = float('inf')
+            self.ortho_threshold = float('inf')
+        else:
+            # Get default thresholds from streaming config
+            thresholds = StreamingConfig.get_thresholds(streaming_mode if streaming_mode != "auto" else "balanced")
+            self.hadamard_threshold = thresholds.hadamard_elements
+            self.ldlq_threshold = thresholds.ldlq_dim
+            self.hessian_threshold = thresholds.hessian_dim
+            self.ortho_threshold = thresholds.ortho_dim
 
     def cleanup(self):
         """Clear caches and free memory. Call after processing each tensor in low_memory mode."""
@@ -158,7 +143,7 @@ class QuIPInt8Converter:
         from ..utils.buffer_pool import clear_buffer_pool
         cleared = clear_buffer_pool()
         if cleared > 0:
-            verbose(f"[QuIP] Cleaned up {cleared} buffer sets from pool")
+            verbose(f"Cleaned up {cleared} buffer sets from pool")
         
         import gc
         gc.collect()
@@ -233,15 +218,144 @@ class QuIPInt8Converter:
         from ..utils.buffer_pool import get_buffer_pool
         pool = get_buffer_pool()
         
-        # Get buffers from pool (sliced to exact size needed)
-        self._q_buffer, self._err_buffer, self._W_buffer = pool.get_buffers(
-            M, N, block_size, buf_device
-        )
+        try:
+            # Get buffers from pool (sliced to exact size needed)
+            self._q_buffer, self._err_buffer, self._W_buffer = pool.get_buffers(
+                M, N, block_size, buf_device
+            )
+        except torch.cuda.OutOfMemoryError:
+            if buf_device != 'cpu':
+                verbose(f"OOM allocating buffers on {buf_device}, falling back to CPU")
+                maybe_empty_cache(force=True)
+                self._q_buffer, self._err_buffer, self._W_buffer = pool.get_buffers(
+                    M, N, block_size, 'cpu'
+                )
+            else:
+                raise
 
-    def _get_random_signs(self, n: int) -> Tensor:
-        """Get random signs (+1/-1) for QuIP. Does NOT reset seed - that's done once in __init__."""
-        return torch.randint(0, 2, (n,), device=self.device).float() * 2 - 1
+    def _get_random_signs(self, n: int, generator: Optional[torch.Generator] = None) -> Tensor:
+        """Get random signs (+1/-1) for QuIP. Uses local generator if provided."""
+        if generator is not None:
+            signs = torch.randint(0, 2, (n,), device=generator.device, generator=generator).float() * 2 - 1
+            return signs
+        signs = torch.randint(0, 2, (n,), device=self.device).float() * 2 - 1
+        return signs
+    
+    def _apply_diagonal_rescaling(self, W: Tensor, H: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        Apply diagonal rescaling as per QuIP paper Algorithm 1, Lines 3-4.
+        
+        D_tilde ← ∜(diag(H) / diag(W^T W))  # fourth root, element-wise
+        W ← W · D_tilde
+        H ← D_tilde^(-1) · H · D_tilde^(-1)
+        
+        Args:
+            W: Weight matrix (M x N)
+            H: Hessian matrix (N x N)
+            
+        Returns:
+            Tuple of (rescaled W, rescaled H, D_tilde diagonal matrix)
+        """
+        device = W.device
+        M, N = W.shape
+        
+        # Compute diag(H) - Hessian diagonal
+        H_diag = torch.diag(H).to(device)
+        
+        # Compute diag(W^T @ W) - column-wise squared norms
+        WtW_diag = (W ** 2).sum(dim=0)  # Sum over rows = W^T @ W diagonal
+        
+        # Avoid division by zero
+        WtW_diag = torch.clamp(WtW_diag, min=1e-12)
+        H_diag = torch.clamp(H_diag, min=1e-12)
+        
+        # D_tilde = fourth_root(diag(H) / diag(W^T @ W))
+        # Use double precision for diagonal rescaling to ensure consistency across devices
+        ratio = H_diag.double() / WtW_diag.double()
+        D_tilde = torch.pow(ratio, 0.25).to(device, dtype=torch.float32)  # Fourth root
+        
+        # Clamp D_tilde to reasonable range to prevent numerical instability
+        D_tilde = torch.clamp(D_tilde, min=0.1, max=10.0)
+        
+        # Rescale W: W ← W · D_tilde (multiply each column by corresponding D_tilde element)
+        W_rescaled = W * D_tilde.unsqueeze(0)
+        
+        # Rescale H: H ← D_tilde^(-1) · H · D_tilde^(-1)
+        D_inv = 1.0 / D_tilde
+        H_rescaled = H * D_inv.unsqueeze(0) * D_inv.unsqueeze(1)
+        
+        return W_rescaled, H_rescaled, D_tilde
 
+    def _undo_diagonal_rescaling(self, W: Tensor, D_tilde: Tensor) -> Tensor:
+        """
+        Undo diagonal rescaling (inverse of _apply_diagonal_rescaling).
+        
+        W ← W / D_tilde (element-wise division of columns)
+        
+        Args:
+            W: Weight matrix (M x N)
+            D_tilde: Diagonal scaling factors from _apply_diagonal_rescaling
+            
+        Returns:
+            Unscaled weight matrix
+        """
+        # Avoid division by zero - D_tilde should never be zero, but clamp for safety
+        D_tilde_safe = torch.clamp(D_tilde, min=1e-12)
+        return W / D_tilde_safe.unsqueeze(0)
+    
+    def _apply_random_permutation(self, W: Tensor, H: Tensor, generator: Optional[torch.Generator] = None) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        Apply random permutation to weights as per QuIP paper Section 4.3.
+        
+        "We also randomly permute entries at the fast matrix multiplication step
+        to prevent any correlation between attention heads from worsening performance."
+        
+        Args:
+            W: Weight matrix (M x N)
+            H: Hessian matrix (N x N)
+            generator: Optional generator for reproducibility
+            
+        Returns:
+            Tuple of (permuted W, permuted H, permutation indices)
+        """
+        device = W.device
+        M, N = W.shape
+        
+        # Generate random permutation on CPU for reproducibility across devices
+        # Keep perm on CPU initially, only move to target device when needed
+        if generator is not None:
+            perm = torch.randperm(N, device='cpu', generator=generator)
+        else:
+            perm = torch.randperm(N, device='cpu')
+        
+        try:
+            # Move perm to target device for GPU permutation attempt
+            perm_device = perm.to(device)
+            
+            # Apply permutation to W columns
+            W_permuted = W[:, perm_device]
+            
+            # Apply permutation to H (both rows and columns)
+            # Fancy indexing H[perm][:, perm] creates a large intermediate copy
+            H_permuted = H[perm_device][:, perm_device]
+        except torch.cuda.OutOfMemoryError:
+            verbose(f"OOM during GPU permutation, falling back to CPU")
+            self._report_oom('perm_gpu', N * N)
+            maybe_empty_cache(force=True)
+            # Move to CPU and retry - perm is already on CPU
+            W_cpu = W.cpu()
+            H_cpu = H.cpu()
+            W_permuted = W_cpu[:, perm].to(device)
+            H_permuted = H_cpu[perm][:, perm].to(device)
+        
+        # Return perm on CPU for consistency, caller can move to device if needed
+        return W_permuted, H_permuted, perm
+    
+    def _undo_permutation(self, W: Tensor, perm: Tensor) -> Tensor:
+        """Undo the random permutation."""
+        inv_perm = torch.argsort(perm)
+        return W[:, inv_perm]
+    
     def _apply_orthogonal(self, x: Tensor, dim: int) -> Tensor:
         """
         Apply orthogonal transformation to x along dim.
@@ -250,7 +364,8 @@ class QuIPInt8Converter:
         n = x.shape[dim]
         if self.use_hadamard and is_power_of_two(n):
             # Apply random signs then Hadamard
-            signs = self._get_random_signs(n)
+            # Ensure signs are on same device as x to avoid device mismatch
+            signs = self._get_random_signs(n).to(x.device)
             
             # Reshape signs for broadcasting
             shape = [1] * x.ndim
@@ -267,10 +382,20 @@ class QuIPInt8Converter:
         else:
             # Fallback to full matrix
             Q = self._get_orthogonal_matrix(n)
+            # Ensure Q is on same device as x
+            if Q.device != x.device:
+                Q = Q.to(x.device)
+            
             if dim == 0:
                 return Q @ x
-            else:
+            elif dim == -1 or dim == x.ndim - 1:
                 return x @ Q.t()
+            else:
+                # For middle dimensions, transpose, apply, transpose back
+                # e.g., for 3D tensor with dim=1: [B, N, C] -> [B, C, N] -> apply -> [B, C, N] -> [B, N, C]
+                x = x.transpose(dim, -1)
+                x = x @ Q.t()
+                return x.transpose(dim, -1)
 
     def _get_orthogonal_matrix(self, n: int) -> Tensor:
         """Get or compute orthogonal matrix of size n."""
@@ -293,7 +418,7 @@ class QuIPInt8Converter:
             self._ortho_cache[n] = Q
         return Q
 
-    def _apply_incoherence(self, W: Tensor, H: Tensor) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
+    def _apply_incoherence(self, W: Tensor, H: Tensor) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
         """
         Transform W and H to make them more "incoherent" (uniform).
         W' = U @ W @ V^T
@@ -303,8 +428,21 @@ class QuIPInt8Converter:
         - Returns FULL padded tensor (M_pad x N_pad) to preserve transform information
         - Original dimensions should be tracked by caller for final slicing
         - Sign vectors are returned at full padded length
+        
+        QuIP Paper Improvements:
+        - Diagonal rescaling (Algorithm 1, Lines 3-4)
+        - Random permutation (Section 4.3)
         """
         M, N = W.shape
+        
+        # Track if we applied diagonal rescaling (need to undo later)
+        D_tilde = None
+        perm = None
+        
+        # QuIP Paper Improvement: Diagonal Rescaling
+        if self.use_diagonal_rescaling:
+            verbose("Applying diagonal rescaling (Algorithm 1, Lines 3-4)")
+            W, H, D_tilde = self._apply_diagonal_rescaling(W, H)
         
         if self.use_hadamard:
             # Use Fast Hadamard Transform for speed and low VRAM
@@ -347,8 +485,6 @@ class QuIPInt8Converter:
                 # This prevents OOM when the adaptive manager is too optimistic
                 safety_limit = SAFETY_THRESHOLD_ELEMENTS * 2  # ~400MB FP32, ~1200MB BF16
                 if total_elements > safety_limit:
-                    if not use_cpu:
-                        verbose(f"[QuIP] Safety override: Large tensor (W:{weight_elements} H:{hessian_elements} elements) forcing CPU")
                     use_cpu = True
             else:
                 # Static threshold based on streaming mode
@@ -381,21 +517,21 @@ class QuIPInt8Converter:
                 reason=f"{total_elements} elements vs {cpu_threshold:.0f} threshold"
             )
             
-            # Inform about large tensor processing decisions
             if total_elements > 50_000_000:
-                verbose(f"[QuIP] Large tensor: using {calc_device}")
+                verbose(f"Large tensor: using {calc_device}")
             
-            # Set seed once before generating all random signs
+            # Create local generator for random signs to avoid affecting global RNG
+            # ALWAYS use CPU generator for reproducibility across devices
+            sign_gen = None
             if self.seed is not None:
-                torch.manual_seed(self.seed)
+                sign_gen = torch.Generator(device='cpu').manual_seed(self.seed)
             
-            # Compute signs (small tensors, OK to keep)
-            s_u = self._get_random_signs(M_pad).to(calc_device)
-            s_v = self._get_random_signs(N_pad).to(calc_device)
+            s_u = self._get_random_signs(M_pad, generator=sign_gen).to(calc_device)
+            s_v = self._get_random_signs(N_pad, generator=sign_gen).to(calc_device)
             
-            # Memory cleanup before large transform operations
-            if calc_device == "cpu" and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Memory cleanup before large transform operations (conditional)
+            if calc_device == "cpu":
+                maybe_empty_cache(pressure_threshold=0.80)
             
             # Try Hadamard on calc_device, fallback to CPU on OOM
             try:
@@ -403,28 +539,20 @@ class QuIPInt8Converter:
                 if M != M_pad or N != N_pad:
                     import torch.nn.functional as F
                     W_padded = F.pad(W.to(calc_device), (0, N_pad - N, 0, M_pad - M))
-                    
-                    # Apply signs
                     W_padded.mul_(s_u.view(-1, 1))
                     W_padded.mul_(s_v.view(1, -1))
-                    
                     # Apply H to rows and cols (matching working version order)
                     W_prime = fast_hadamard_transform(W_padded.t()).t()
                     W_prime = fast_hadamard_transform(W_prime)
-                    
-                    # Keep full padded tensor for correct inverse transform
                     del W_padded
                 else:
-                    # Apply signs
                     W_prime = W.to(calc_device) * s_u.view(-1, 1) * s_v.view(1, -1)
-                    
-                    # Apply H to rows and cols
                     W_prime = fast_hadamard_transform(W_prime.t()).t()
                     W_prime = fast_hadamard_transform(W_prime)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"[QuIP] OOM in Hadamard W transform on {calc_device}, falling back to CPU")
+                verbose(f"OOM in Hadamard W transform on {calc_device}, falling back to CPU")
                 self._report_oom('hadamard_w', M_pad * N_pad)
-                torch.cuda.empty_cache()
+                maybe_empty_cache(force=True)  # Force cleanup on OOM
                 calc_device = "cpu"
                 # Retry on CPU - move sign vectors to CPU
                 s_u = s_u.to(calc_device)
@@ -448,29 +576,19 @@ class QuIPInt8Converter:
                 if N != N_pad:
                     import torch.nn.functional as F
                     H_padded = F.pad(H.to(calc_device), (0, N_pad - N, 0, N_pad - N))
-                    # For H, we apply s_v to both dimensions
-                    
-                    # Apply signs
                     H_padded.mul_(s_v.view(-1, 1))
                     H_padded.mul_(s_v.view(1, -1))
-                    
-                    # Apply H to rows and cols
                     H_prime = fast_hadamard_transform(H_padded.t()).t()
                     H_prime = fast_hadamard_transform(H_prime)
-                    
-                    # DO NOT slice - keep full padded tensor
                     del H_padded
                 else:
-                    # Apply signs
                     H_prime = H.to(calc_device) * s_v.view(-1, 1) * s_v.view(1, -1)
-                    
-                    # Apply H to rows and cols
-                    H_prime = fast_hadamard_transform(H_prime.t(), inplace=True).t()
-                    H_prime = fast_hadamard_transform(H_prime, inplace=True)
+                    H_prime = fast_hadamard_transform(H_prime.t()).t()
+                    H_prime = fast_hadamard_transform(H_prime)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"[QuIP] OOM in Hadamard H transform on {calc_device}, falling back to CPU")
+                verbose(f"OOM in Hadamard H transform on {calc_device}, falling back to CPU")
                 self._report_oom('hadamard_h', N_pad * N_pad)
-                torch.cuda.empty_cache()
+                maybe_empty_cache(force=True)  # Force cleanup on OOM
                 calc_device = "cpu"
                 # Retry on CPU - move s_v to CPU as well
                 s_v = s_v.to(calc_device)
@@ -484,11 +602,17 @@ class QuIPInt8Converter:
                     del H_padded
                 else:
                     H_prime = H.to(calc_device) * s_v.view(-1, 1) * s_v.view(1, -1)
-                    H_prime = fast_hadamard_transform(H_prime.t(), inplace=True).t()
-                    H_prime = fast_hadamard_transform(H_prime, inplace=True)
+                    H_prime = fast_hadamard_transform(H_prime.t()).t()
+                    H_prime = fast_hadamard_transform(H_prime)
+            
+            # QuIP Paper Improvement: Random Permutation
+            # Apply AFTER Hadamard transform (Section 4.3: "at the fast matrix multiplication step")
+            if self.use_random_permutation:
+                debug("Applying random permutation (Section 4.3)")
+                W_prime, H_prime, perm = self._apply_random_permutation(W_prime, H_prime, generator=sign_gen)
             
             # Return on calc_device to preserve memory savings (caller handles device placement)
-            return W_prime, H_prime, None, None, s_u, s_v
+            return W_prime, H_prime, None, None, s_u, s_v, D_tilde, perm
         else:
             U = self._get_orthogonal_matrix(M)
             V = self._get_orthogonal_matrix(N)
@@ -500,7 +624,16 @@ class QuIPInt8Converter:
             # H_prime = V @ H @ V.T
             H_prime = (V @ H.to(V.device) @ V.t().to(V.device)).to(self.device)
             
-            return W_prime, H_prime, U, V, None, None
+                # QuIP Paper Improvement: Random Permutation
+            if self.use_random_permutation:
+                debug("Applying random permutation (Section 4.3)")
+                # Create local generator for random permutation if seed provided
+                perm_gen = None
+                if self.seed is not None:
+                    perm_gen = torch.Generator(device='cpu').manual_seed(self.seed)
+                W_prime, H_prime, perm = self._apply_random_permutation(W_prime, H_prime, generator=perm_gen)
+            
+            return W_prime, H_prime, U, V, None, None, D_tilde, perm
 
     def _quantize_block_lazy(self, W_block, Q_block, Err_block, Hinv_block, scale):
         """Vectorized column processing with lazy updates and per-row scale."""
@@ -524,6 +657,8 @@ class QuIPInt8Converter:
             
             # Compute errors
             d_batch = torch.diag(Hinv_block[j:end_j, j:end_j])
+            # Clamp to prevent divide-by-zero
+            d_batch = torch.clamp(d_batch, min=1e-12)
             err_batch = (w_batch - q_batch * scale) / d_batch.unsqueeze(0)
             Err_block[:, j:end_j] = err_batch
             
@@ -532,9 +667,9 @@ class QuIPInt8Converter:
                 update_factors = Hinv_block[j:end_j, end_j:]
                 W_block[:, end_j:] -= err_batch @ update_factors
             
-            # Periodic cleanup during quantization to prevent OOM accumulation
-            if j % (BATCH * 8) == 0 and W_block.device.type == 'cuda':
-                torch.cuda.empty_cache()
+            # Periodic cleanup during quantization (conditional, rate-limited)
+            if j % (BATCH * 32) == 0 and W_block.device.type == 'cuda':
+                maybe_empty_cache(pressure_threshold=0.92)
 
     def _refine_with_learned_rounding(
         self,
@@ -578,26 +713,116 @@ class QuIPInt8Converter:
         
         return (Q_float + delta.detach()).round().clamp(-127, 127).to(torch.int8)
 
+    def _refine_with_greedy_coordinate_descent(
+        self,
+        Q_prime: Tensor,  # Quantized in transformed space
+        W_target: Tensor,  # Original transformed weights
+        H: Tensor,  # Hessian for computing loss
+        scale: Tensor,
+        num_iterations: int = 100,
+    ) -> Tensor:
+        """
+        Greedy coordinate descent as per QuIP paper Section 4.3.
+        
+        Updates weights in the same order as the initial pass to minimize proxy loss:
+        ℓ(Ŵ) = tr(H) · ||W - Ŵ||²
+        
+        Args:
+            Q_prime: Initial quantized weights
+            W_target: Target weights to match
+            H: Hessian matrix for loss computation
+            scale: Quantization scale
+            num_iterations: Number of coordinate descent iterations
+            
+        Returns:
+            Refined quantized weights
+        """
+        verbose(f"Applying greedy coordinate descent ({num_iterations} iterations)")
+        
+        device = Q_prime.device
+        Q_float = Q_prime.float().clone()
+        W_target = W_target.to(device)
+        H_diag = torch.diag(H).to(device).abs().clamp(min=1e-12)
+        
+        # Compute initial error
+        M, N = W_target.shape
+        best_loss = float('inf')
+        no_improve_count = 0
+        
+        for iteration in range(num_iterations):
+            improved = False
+            
+            # Process each coordinate in order (column-major to match LDLQ)
+            for j in range(N):
+                # Get the column
+                w_col = W_target[:, j]
+                q_col = Q_float[:, j]
+                h_j = H_diag[j]
+                
+                # Compute current dequantized values
+                dq_col = q_col * scale.squeeze()
+                
+                # Compute errors for this column
+                errors = w_col - dq_col
+                
+                # For each row in the column, try +1 and -1 adjustments
+                for i in range(M):
+                    current_q = Q_float[i, j].item()
+                    current_err = errors[i].item()
+                    
+                    # Try +1 adjustment
+                    dq_plus = (current_q + 1) * scale[i].item() if scale.dim() > 0 else (current_q + 1) * scale.item()
+                    err_plus = abs(w_col[i].item() - dq_plus)
+                    
+                    # Try -1 adjustment
+                    dq_minus = (current_q - 1) * scale[i].item() if scale.dim() > 0 else (current_q - 1) * scale.item()
+                    err_minus = abs(w_col[i].item() - dq_minus)
+                    
+                    # Current error
+                    err_current = abs(current_err)
+                    
+                    # Choose best adjustment weighted by Hessian diagonal
+                    weighted_plus = err_plus * h_j
+                    weighted_minus = err_minus * h_j
+                    weighted_current = err_current * h_j
+                    
+                    if weighted_plus < weighted_current and weighted_plus <= weighted_minus:
+                        Q_float[i, j] = current_q + 1
+                        improved = True
+                    elif weighted_minus < weighted_current and weighted_minus < weighted_plus:
+                        Q_float[i, j] = current_q - 1
+                        improved = True
+            
+            # Compute loss for this iteration
+            dq_current = Q_float * scale
+            loss = torch.mean(H_diag * ((W_target - dq_current) ** 2).sum(dim=0))
+            
+            if loss < best_loss:
+                best_loss = loss
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+            
+            # Early stopping
+            if no_improve_count >= 10:
+                verbose(f"Greedy CD early stop at iteration {iteration}")
+                break
+        
+        return Q_float.clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX).round().to(torch.int8)
+
     def _single_ldlq_pass(self, W: Tensor, Hinv: Tensor, scale: Tensor) -> Tensor:
         """Single pass of LDLQ quantization."""
         M_work, N_work = W.shape
-        Q_prime = torch.zeros_like(W, dtype=torch.int8)
-        
-        # Log memory status before clone
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / (1024**3)
-            reserved = torch.cuda.memory_reserved() / (1024**3)
-            total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            verbose(f"[QuIP-DEBUG] Before W.clone(): W.shape=({M_work},{N_work}), device={W.device}, "
-                    f"W_size={W.numel() * 4 / (1024**3):.2f}GB, "
-                    f"GPU allocated={allocated:.2f}GB/{total:.2f}GB ({allocated/total*100:.1f}%)")
         
         # Try GPU first, fallback to CPU on OOM
         original_device = W.device
         try:
             W_work = W.clone()
+            target_device = W_work.device
+            # Allocate Q_prime AFTER device is determined
+            Q_prime = torch.zeros_like(W_work, dtype=torch.int8)
         except torch.cuda.OutOfMemoryError:
-            verbose(f"[QuIP] OOM on GPU W.clone(), falling back to CPU")
+            verbose(f"OOM on GPU W.clone(), falling back to CPU")
             self._report_oom('ldlq_clone', W.numel())
             torch.cuda.empty_cache()
             # Move inputs to CPU and retry
@@ -605,17 +830,26 @@ class QuIPInt8Converter:
             Hinv = Hinv.cpu()
             scale = scale.cpu()
             W_work = W.clone()
-            verbose(f"[QuIP] Successfully cloned on CPU, device={W_work.device}")
+            target_device = W_work.device
+            # Allocate Q_prime on CPU
+            Q_prime = torch.zeros_like(W_work, dtype=torch.int8)
+            verbose(f"Successfully cloned on CPU, device={W_work.device}")
         
         # Ensure all inputs are on the same device
-        target_device = W_work.device
         if Hinv.device != target_device:
             Hinv = Hinv.to(target_device)
         if scale.device != target_device:
             scale = scale.to(target_device)
         
+        # Ensure buffers are on the correct device
+        if self._q_buffer is None or self._q_buffer.device != target_device:
+            self._ensure_buffers(M_work, N_work, self.block_size, str(target_device))
+        
         pbar = tqdm(range(0, N_work, self.block_size), desc="    LDLQ Pass", leave=False)
         for i1 in pbar:
+            # Update progress bar with device info
+            if i1 % (self.block_size * 4) == 0:
+                pbar.set_postfix(device=str(W_work.device), refresh=False)
             i2 = min(i1 + self.block_size, N_work)
             count = i2 - i1
             
@@ -640,59 +874,73 @@ class QuIPInt8Converter:
                     update_slice = update_slice.to(W_work.device)
                 
                 # Memory-efficient update: process in chunks to avoid large intermediate tensors
-                # Err_block @ update_slice can be huge (e.g., [4096, 128] @ [128, 3968] = [4096, 3968])
-                # Process in column chunks to reduce peak memory
                 remaining_cols = N_work - i2
-                chunk_size = min(512, remaining_cols)  # Process 512 columns at a time
+                is_cuda = Err_block.is_cuda
                 
-                # BF16 optimization check for LDLQ updates
+                # Adaptive chunk size: larger for CPU, smaller for GPU
+                if not is_cuda:
+                    chunk_size = min(8192, remaining_cols)
+                else:
+                    chunk_size = min(1024, remaining_cols)
+                
                 from ..constants import should_use_bf16_for_op
-                use_bf16 = should_use_bf16_for_op(Err_block.numel() * update_slice.numel(), "ldlq")
-                device_type = 'cuda' if Err_block.is_cuda else 'cpu'
+                # Only use BF16 on CUDA; FP32 is usually faster on CPU
+                use_bf16 = is_cuda and should_use_bf16_for_op(Err_block.numel() * update_slice.numel(), "ldlq")
+                device_type = 'cuda' if is_cuda else 'cpu'
                 
-                for col_start in range(0, remaining_cols, chunk_size):
-                    col_end = min(col_start + chunk_size, remaining_cols)
+                # Optimization: If remaining part is small enough, do it in one go
+                if remaining_cols <= chunk_size:
                     try:
-                        # Compute partial result for this chunk only
-                        # Use BF16 for large matrix multiplications
                         if use_bf16:
                             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                                chunk_update = Err_block @ update_slice[:, col_start:col_end]
-                            chunk_update = chunk_update.float()
+                                W_work[:, i2:] -= (Err_block @ update_slice).float()
                         else:
-                            chunk_update = Err_block @ update_slice[:, col_start:col_end]
-                        W_work[:, i2 + col_start:i2 + col_end] -= chunk_update
-                        # Free the chunk update immediately
-                        del chunk_update
-                        if W_work.device.type == 'cuda':
-                            torch.cuda.empty_cache()
+                            W_work[:, i2:] -= Err_block @ update_slice
+                        if is_cuda:
+                            maybe_empty_cache(pressure_threshold=0.95, device=W_work.device)
                     except torch.cuda.OutOfMemoryError:
-                        verbose(f"[QuIP] OOM in update chunk {col_start}, forcing CPU")
-                        self._report_oom('ldlq_update_chunk', chunk_size * Err_block.shape[0])
-                        torch.cuda.empty_cache()
-                        # Move to CPU and continue
-                        if W_work.device.type == 'cuda':
-                            W_work = W_work.cpu()
-                        if Err_block.device.type == 'cuda':
-                            Err_block = Err_block.cpu()
-                        if update_slice.device.type == 'cuda':
-                            update_slice = update_slice.cpu()
-                        # Retry this chunk on CPU
-                        if use_bf16:
-                            with torch.autocast(device_type='cpu', dtype=torch.bfloat16):
+                        # Fallback to chunked if one-shot fails
+                        chunk_size = 512
+                        for col_start in range(0, remaining_cols, chunk_size):
+                            col_end = min(col_start + chunk_size, remaining_cols)
+                            W_work[:, i2 + col_start:i2 + col_end] -= Err_block @ update_slice[:, col_start:col_end]
+                else:
+                    # Chunked processing
+                    for col_start in range(0, remaining_cols, chunk_size):
+                        col_end = min(col_start + chunk_size, remaining_cols)
+                        try:
+                            if use_bf16:
+                                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                                    chunk_update = Err_block @ update_slice[:, col_start:col_end]
+                                chunk_update = chunk_update.float()
+                            else:
                                 chunk_update = Err_block @ update_slice[:, col_start:col_end]
-                            chunk_update = chunk_update.float()
-                        else:
-                            chunk_update = Err_block @ update_slice[:, col_start:col_end]
-                        W_work[:, i2 + col_start:i2 + col_end] -= chunk_update
-                        del chunk_update
+                            W_work[:, i2 + col_start:i2 + col_end] -= chunk_update
+                            del chunk_update
+                            
+                            # Only cleanup on GPU and only occasionally
+                            if is_cuda and col_start % (chunk_size * 4) == 0:
+                                maybe_empty_cache(pressure_threshold=0.92, device=W_work.device)
+                        except torch.cuda.OutOfMemoryError:
+                            verbose(f"OOM in update chunk {col_start}, forcing CPU")
+                            self._report_oom('ldlq_update_chunk', chunk_size * Err_block.shape[0])
+                            maybe_empty_cache(force=True)
+                            if W_work.device.type == 'cuda': W_work = W_work.cpu()
+                            if Err_block.device.type == 'cuda': Err_block = Err_block.cpu()
+                            if update_slice.device.type == 'cuda': update_slice = update_slice.cpu()
+                            # Also move buffers to CPU to avoid mixed-device operations in next iterations
+                            self._ensure_buffers(M_work, N_work, self.block_size, 'cpu')
+                            device_type = 'cpu'
+                            is_cuda = False
+                            # Continue with CPU (FP32)
+                            W_work[:, i2 + col_start:i2 + col_end] -= Err_block @ update_slice[:, col_start:col_end]
                 
         # Move result back to original device if processed on CPU
         if Q_prime.device != original_device:
             try:
                 Q_prime = Q_prime.to(original_device)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"[QuIP] Cannot move result back to GPU, keeping on CPU")
+                verbose(f"Cannot move result back to GPU, keeping on CPU")
         
         return Q_prime
 
@@ -701,14 +949,7 @@ class QuIPInt8Converter:
         # Check if we should use checkpointed quantization
         M, N = W.shape
         
-        # Log tensor info and memory status
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / (1024**3)
-            reserved = torch.cuda.memory_reserved() / (1024**3)
-            verbose(f"[QuIP] LDLQ start: W.shape=({M},{N}), device={W.device}, "
-                    f"GPU allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
-        else:
-            verbose(f"[QuIP] LDLQ start: W.shape=({M},{N}), device={W.device}")
+        verbose(f"LDLQ: processing {M}x{N} matrix on {W.device}")
         
         # Auto-enable checkpointed LDLQ for large matrices in streaming/low_memory mode
         # This prevents OOM by processing in segments
@@ -731,7 +972,7 @@ class QuIPInt8Converter:
             # BF16 compute mode is active - it already provides memory savings
             # Only use checkpointed if explicitly requested (handled above)
             should_use_checkpointed = False
-            verbose(f"[QuIP] BF16 compute mode active - skipping checkpointed quantization for speed")
+            verbose(f"BF16 compute mode active - skipping checkpointed quantization for speed")
         else:
             # Auto-enable for streaming/low_memory mode
             should_use_checkpointed = (
@@ -740,15 +981,9 @@ class QuIPInt8Converter:
                 iterations <= 1
             )
         
-        verbose(f"[QuIP-DEBUG] Checkpointed check: use_checkpointed={self.use_checkpointed_ldlq}, "
-                f"streaming={self.streaming}, low_memory={self.low_memory}, "
-                f"bf16_active={bf16_compute_active}, "
-                f"N={N} >= threshold={self.checkpointed_ldlq_threshold}, "
-                f"iterations={iterations} <= 1, should_use={should_use_checkpointed}")
-        
         if should_use_checkpointed:
             from ..utils.checkpointed_quant import checkpointed_ldlq
-            verbose(f"[QuIP] Using checkpointed LDLQ for {M}x{N} matrix "
+            verbose(f"Using checkpointed LDLQ for {M}x{N} matrix "
                     f"({self.checkpoint_segments} segments)")
             try:
                 return checkpointed_ldlq(
@@ -758,7 +993,7 @@ class QuIPInt8Converter:
                     use_tqdm=True
                 )
             except torch.cuda.OutOfMemoryError:
-                verbose(f"[QuIP-RECOVERY] OOM in checkpointed LDLQ on GPU, trying CPU")
+                verbose(f"OOM in checkpointed LDLQ on GPU, trying CPU")
                 self._report_oom('checkpointed_ldlq_gpu', M * N)
                 torch.cuda.empty_cache()
                 # Move to CPU and retry with more segments
@@ -771,7 +1006,7 @@ class QuIPInt8Converter:
                     checkpoint_segments=self.checkpoint_segments * 2,  # More segments on CPU
                     use_tqdm=True
                 )
-                verbose(f"[QuIP-RECOVERY] Checkpointed LDLQ completed on CPU")
+                verbose(f"Checkpointed LDLQ completed on CPU")
                 return result
         
         if iterations <= 1:
@@ -792,6 +1027,7 @@ class QuIPInt8Converter:
         
         return Q_accum.to(torch.int8)
 
+    @torch.no_grad()
     def convert(
         self,
         weight: Tensor,
@@ -834,13 +1070,13 @@ class QuIPInt8Converter:
             smooth_factors = smoother.compute_smoothing_factors(W, activation_scales.to(self.device))
             W = smoother.apply_to_weight(W, smooth_factors)
             
-            # Also smooth the Hessian
-            # H is X.T @ X, so after smoothing X by 1/s: H_smooth = diag(1/s) @ H @ diag(1/s)
+            # Also smooth the Hessian (H = X.T @ X)
+            # After smoothing X by 1/s: H_smooth = diag(1/s) @ H @ diag(1/s)
             inv_s = 1.0 / smooth_factors
             H = H * inv_s.unsqueeze(0) * inv_s.unsqueeze(1)
 
         # 2. Apply Incoherence Processing
-        W, H, U, V, s_u, s_v = self._apply_incoherence(W, H)
+        W, H, U, V, s_u, s_v, D_tilde, rand_perm = self._apply_incoherence(W, H)
         
         # Get actual working dimensions (may be padded)
         M, N = W.shape
@@ -854,7 +1090,7 @@ class QuIPInt8Converter:
         
         # Ensure tensors are on the correct device for subsequent operations
         # (they may be on CPU if low_memory mode processed them there)
-        # OPTIMIZATION: If LDLQ will run on CPU, keep tensors on CPU to avoid double transfer
+        # If LDLQ will run on CPU, keep tensors on CPU to avoid double transfer
         if not use_cpu_ldlq:
             if W.device != self.device:
                 W = W.to(self.device)
@@ -862,14 +1098,16 @@ class QuIPInt8Converter:
                 H = H.to(self.device)
         else:
             # Keep on CPU for LDLQ - will be moved to GPU after quantization if needed
-            verbose(f"[QuIP] Keeping tensors on CPU for LDLQ (dim={N})")
+            verbose(f"Keeping tensors on CPU for LDLQ (dim={N})")
         
         # 3. Damping (same as GPTQ)
-        dead = torch.diag(H) == 0
+        # Use double precision for damping calculation to ensure consistency
+        H_diag_orig = torch.diag(H)
+        dead = H_diag_orig == 0
         H[dead, dead] = 1
         W[:, dead] = 0
         
-        damp = self.percdamp * torch.mean(torch.diag(H))
+        damp = self.percdamp * torch.mean(H_diag_orig.double()).float()
         diag = torch.arange(N, device=H.device)
         H[diag, diag] += damp
         
@@ -878,20 +1116,44 @@ class QuIPInt8Converter:
         if self.actorder:
             perm = torch.argsort(torch.diag(H), descending=True)
             
-            # In low_memory mode, do permutation on CPU to avoid OOM from fancy indexing
-            if self.low_memory:
-                H_cpu = H.cpu()
-                perm_cpu = perm.cpu()
-                H = H_cpu[perm_cpu][:, perm_cpu]
-                W_cpu = W.cpu()
-                W = W_cpu[:, perm_cpu]
+            # Determine if permutation should happen on CPU to avoid OOM from fancy indexing
+            # Fancy indexing H[perm][:, perm] creates a large intermediate copy
+            if self._no_memory_limits:
+                use_cpu_perm = False
             else:
-                W = W[:, perm]
-                H = H[perm][:, perm]
+                # Use Hessian threshold as a proxy for permutation memory safety
+                hessian_threshold = self._get_hessian_threshold()
+                use_cpu_perm = self.low_memory or self.streaming or (N > hessian_threshold)
+            
+            if use_cpu_perm:
+                verbose(f"Permuting tensors on CPU to avoid OOM (dim={N})")
+                try:
+                    H_cpu = H.cpu()
+                    perm_cpu = perm.cpu()
+                    H = H_cpu[perm_cpu][:, perm_cpu]
+                    W_cpu = W.cpu()
+                    W = W_cpu[:, perm_cpu]
+                except torch.cuda.OutOfMemoryError:
+                    # If we OOM just trying to move to CPU (unlikely but possible if GPU is very full)
+                    self._report_oom('perm_cpu_move', N * N)
+                    maybe_empty_cache(force=True)
+                    # Retry with more aggressive cleanup
+                    H = H.cpu()[perm.cpu()][:, perm.cpu()]
+                    W = W.cpu()[:, perm.cpu()]
+            else:
+                try:
+                    W = W[:, perm]
+                    H = H[perm][:, perm]
+                except torch.cuda.OutOfMemoryError:
+                    verbose(f"OOM during GPU permutation, falling back to CPU")
+                    self._report_oom('perm_gpu', N * N)
+                    maybe_empty_cache(force=True)
+                    H = H.cpu()[perm.cpu()][:, perm.cpu()]
+                    W = W.cpu()[:, perm.cpu()]
         
         # 5. Hessian Inversion (Cholesky)
         # Use CPU for inversion if N is large to save VRAM
-        # ADAPTIVE STREAMING: Use dynamic threshold from adaptive manager if available
+        # Use dynamic threshold from adaptive manager if available
         if self._no_memory_limits:
             use_cpu_hessian = False  # NO MEMORY LIMITS: Always use GPU
             hessian_threshold = float('inf')
@@ -910,7 +1172,7 @@ class QuIPInt8Converter:
         )
         
         # Run LDLQ on CPU for large matrices in low_memory/streaming mode to avoid OOM
-        # ADAPTIVE STREAMING: Use dynamic threshold from adaptive manager if available
+        # Use dynamic threshold from adaptive manager if available
         if self._no_memory_limits:
             use_cpu_ldlq = False  # NO MEMORY LIMITS: Always use GPU
             ldlq_threshold = float('inf')
@@ -928,47 +1190,116 @@ class QuIPInt8Converter:
         )
         
         try:
-            H_inv_chol = torch.linalg.cholesky(H_inv_work)
-            H_inv = torch.cholesky_inverse(H_inv_chol)
-            H_inv = torch.linalg.cholesky(H_inv, upper=True)
-            Hinv = H_inv.to(ldlq_device)  # Keep on CPU for large low_memory cases
+            # Use double precision for Hessian inversion to ensure consistency across devices
+            try:
+                H_inv_work_d = H_inv_work.double()
+                H_inv_chol = torch.linalg.cholesky(H_inv_work_d)
+                H_inv = torch.cholesky_inverse(H_inv_chol)
+                H_inv = torch.linalg.cholesky(H_inv, upper=True)
+                Hinv = H_inv.to(ldlq_device, dtype=torch.float32)  # Keep on CPU for large low_memory cases
+                del H_inv_work_d, H_inv_chol, H_inv
+            except torch.cuda.OutOfMemoryError:
+                verbose(f"      - OOM during Hessian inversion on {hessian_device}, falling back to CPU")
+                self._report_oom('hessian_inversion', N * N)
+                maybe_empty_cache(force=True)
+                # Move to CPU and retry
+                H_inv_work_cpu = H_inv_work.cpu().double()
+                H_inv_chol = torch.linalg.cholesky(H_inv_work_cpu)
+                H_inv = torch.cholesky_inverse(H_inv_chol)
+                H_inv = torch.linalg.cholesky(H_inv, upper=True)
+                Hinv = H_inv.to(ldlq_device, dtype=torch.float32)
+                del H_inv_work_cpu, H_inv_chol, H_inv
+                verbose(f"      - Hessian inversion completed on CPU")
         except RuntimeError as e:
-            verbose(f"      - QuIP Hessian inversion failed on {hessian_device}: {e}. Falling back to identity.")
-            Hinv = torch.eye(N, device=ldlq_device)
+            verbose(f"      - QuIP Hessian inversion failed: {e}. Falling back to identity.")
+            try:
+                Hinv = torch.eye(N, device=ldlq_device, dtype=torch.float32)
+            except torch.cuda.OutOfMemoryError:
+                verbose(f"      - OOM during identity creation on {ldlq_device}, falling back to CPU")
+                Hinv = torch.eye(N, device='cpu', dtype=torch.float32)
+        
+        del H_inv_work
+        maybe_empty_cache()
 
         # 6. LDLQ Quantization Loop (similar to GPTQ)
         # Compute per-channel (row-wise) scaling for the transformed weights
-        abs_max_per_row = W.abs().amax(dim=1, keepdim=True)
-        scale = (abs_max_per_row / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
+        
+        # QuIP Paper Improvement: Frobenius Norm Scaling
+        # Frobenius scaling is incompatible with Hadamard transforms.
+        # Frobenius uses a single global scale, but Hadamard creates non-uniform
+        # row distributions that require per-row scaling.
+        if self.use_frobenius_scaling and self.use_hadamard:
+            verbose("WARNING: Frobenius scaling is incompatible with Hadamard transforms. "
+                    "Using max-based per-row scaling instead.")
+            effective_use_frobenius = False
+        else:
+            effective_use_frobenius = self.use_frobenius_scaling
+        
+        if effective_use_frobenius:
+            # Algorithm 1, Line 6: s ← ρ · ||W||_F / √(mn)
+            # This uses the spectrum instead of max absolute value
+            frob_norm = torch.norm(W, p='fro')  # Frobenius norm
+            M_w, N_w = W.shape
+            # Per-row scale: each row gets the same scale based on overall Frobenius norm
+            # But we divide by sqrt(N) to get per-row contribution
+            scale_value = self.frobenius_rho * frob_norm / (M_w * (N_w ** 0.5))
+            scale = torch.full((M_w, 1), scale_value, device=W.device, dtype=W.dtype)
+            verbose(f"Using Frobenius norm scaling: scale={scale_value:.6f}")
+        else:
+            # Original: max-based scaling (compatible with Hadamard)
+            # Check if outlier-aware scaling is enabled
+            from ..config.optimization_config import get_optimization_config
+            opt_config = get_optimization_config()
+            
+            # Check if outlier-aware scaling is enabled and percentile is less than 1.0
+            # Use a local variable for percentile to ensure we respect the config
+            percentile = opt_config.outlier_percentile
+            
+            if opt_config.enable_outlier_aware_scaling and percentile < 1.0:
+                # Use percentile to ignore extreme outliers for better quantization
+                # ALWAYS use CPU for quantile to ensure consistency across devices
+                # torch.quantile on CUDA can have slight numerical differences from CPU
+                verbose(f"Using outlier-aware scaling: {percentile*100:.4f}th percentile (CPU-based for consistency)")
+                try:
+                    W_cpu = W.cpu()
+                    abs_max_per_row = W_cpu.abs().quantile(percentile, dim=1, keepdim=True).to(W.device)
+                    del W_cpu
+                except Exception as e:
+                    verbose(f"CPU quantile failed: {e}, falling back to amax scaling")
+                    abs_max_per_row = W.abs().amax(dim=1, keepdim=True)
+            else:
+                # Standard max-based scaling
+                abs_max_per_row = W.abs().amax(dim=1, keepdim=True)
+            
+            scale = (abs_max_per_row / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
         
         # Move W to ldlq_device if needed (for CPU-based LDLQ in low_memory mode)
         if ldlq_device != self.device:
             W = W.to(ldlq_device)
             scale = scale.to(ldlq_device)
         
-        # Keep target for learned rounding if enabled (after device transfer to save memory)
-        W_target = W.clone() if self.use_learned_rounding else None
+        # Keep target for learned rounding or greedy coordinate descent if enabled
+        W_target = W.clone() if (self.use_learned_rounding or self.use_greedy_coordinate_descent) else None
         
-        # Ensure buffers are on the correct device
-        self._ensure_buffers(M, N, self.block_size, ldlq_device)
-        
-        from ..utils.buffer_pool import get_buffer_pool_stats
-        buf_stats = get_buffer_pool_stats()
-        if buf_stats:
-            verbose(f"[QuIP-DEBUG] Buffer pool: {buf_stats['cached_entries']} entries, "
-                    f"{buf_stats['total_allocated_mb']:.1f}MB total")
-        
-        verbose(f"[QuIP-DEBUG] Before LDLQ: W.device={W.device}, Hinv.device={Hinv.device}, "
-                f"scale.device={scale.device}, ldlq_device={ldlq_device}")
-        
-        # AGGRESSIVE GPU: Try LDLQ on current device, fallback to CPU on OOM
+        # Try LDLQ on current device, fallback to CPU on OOM
         try:
+            # Ensure buffers are on the correct device
+            self._ensure_buffers(M, N, self.block_size, ldlq_device)
+            
+            # If buffers fell back to CPU, move inputs to CPU too
+            if self._q_buffer.device.type == 'cpu' and ldlq_device != 'cpu':
+                verbose("Buffers fell back to CPU, moving inputs to CPU")
+                W = W.cpu()
+                Hinv = Hinv.cpu()
+                scale = scale.cpu()
+                ldlq_device = 'cpu'
+
             # Run LDLQ (possibly with multiple iterations)
             Q_prime = self._ldlq_with_iterations(W, Hinv, scale, iterations=self.ldlq_iterations)
         except torch.cuda.OutOfMemoryError:
-            verbose(f"[QuIP-RECOVERY] OOM during LDLQ on {ldlq_device}, forcing CPU fallback")
+            verbose(f"OOM during LDLQ on {ldlq_device}, forcing CPU fallback")
             self._report_oom('ldlq_main', M * N)
-            torch.cuda.empty_cache()
+            maybe_empty_cache(force=True)
             # Move everything to CPU and retry
             W_cpu = W.cpu()
             Hinv_cpu = Hinv.cpu()
@@ -976,7 +1307,11 @@ class QuIPInt8Converter:
             # Clear buffers and reallocate on CPU
             self._ensure_buffers(M, N, self.block_size, 'cpu')
             Q_prime = self._ldlq_with_iterations(W_cpu, Hinv_cpu, scale_cpu, iterations=self.ldlq_iterations)
-            verbose(f"[QuIP-RECOVERY] LDLQ completed on CPU")
+            verbose(f"LDLQ completed on CPU")
+        
+        # Free Hinv as it's no longer needed after LDLQ
+        del Hinv
+        maybe_empty_cache()
         
         # Move Q_prime back to main device if LDLQ ran on CPU
         if Q_prime.device != self.device:
@@ -985,19 +1320,47 @@ class QuIPInt8Converter:
                 if scale.device != self.device:
                     scale = scale.to(self.device)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"[QuIP-RECOVERY] Cannot move result to GPU, keeping on CPU")
+                verbose(f"Cannot move result to GPU, keeping on CPU")
         
         # Optional: Learned Rounding Post-Optimization
         if self.use_learned_rounding and W_target is not None:
             verbose("    Refining QuIP with learned rounding...")
             Q_prime = self._refine_with_learned_rounding(Q_prime, W_target, scale)
+        
+        # QuIP Paper Improvement: Greedy Coordinate Descent
+        if self.use_greedy_coordinate_descent and W_target is not None:
+            verbose("    Refining QuIP with greedy coordinate descent...")
+            # Need H on the same device as Q_prime for the coordinate descent
+            H_cd = H if H.device == Q_prime.device else H.to(Q_prime.device)
+            Q_prime = self._refine_with_greedy_coordinate_descent(
+                Q_prime, W_target, H_cd, scale, num_iterations=self.greedy_cd_iterations
+            )
+            if H_cd is not H: del H_cd
+
+        # Free refinement targets as they are no longer needed
+        if W_target is not None: del W_target
+        if H is not None: del H
+        maybe_empty_cache()
 
         # 7. Compute dequantized_weight in original space for quality reporting
         
         # 8. Restore original order if ActOrder was used
         if self.actorder and perm is not None:
-            inv_perm = torch.argsort(perm).to(Q_prime.device)
-            Q_prime_ordered = Q_prime[:, inv_perm].contiguous()
+            try:
+                inv_perm = torch.argsort(perm).to(Q_prime.device)
+                Q_prime_ordered = Q_prime[:, inv_perm].contiguous()
+                # Free original Q_prime immediately to save memory
+                del Q_prime
+            except torch.cuda.OutOfMemoryError:
+                verbose(f"OOM during ActOrder restoration on {Q_prime.device}, falling back to CPU")
+                self._report_oom('actorder_restore', Q_prime.numel())
+                maybe_empty_cache(force=True)
+                # Move to CPU and perform reordering
+                Q_prime_cpu = Q_prime.cpu()
+                inv_perm_cpu = torch.argsort(perm).cpu()
+                Q_prime_ordered = Q_prime_cpu[:, inv_perm_cpu].contiguous()
+                del Q_prime
+                del Q_prime_cpu
         else:
             Q_prime_ordered = Q_prime
 
@@ -1018,7 +1381,7 @@ class QuIPInt8Converter:
         
         if needs_chunking and tensor_is_on_cpu:
             # Tensor is on CPU and is large - process on CPU to avoid GPU OOM
-            debug(f"      [HADAMARD-DEVICE] Large tensor on CPU, processing on CPU (size={tensor_size})")
+            debug(f"      Hadamard: Large tensor on CPU, processing on CPU (size={tensor_size})")
             calc_device = "cpu"
             W_dequant_transformed = torch.empty_like(Q_prime_ordered, dtype=torch.float32, device="cpu")
             
@@ -1036,14 +1399,14 @@ class QuIPInt8Converter:
                 del chunk  # Free intermediate
         elif needs_chunking and Q_prime_ordered.device.type == "cuda":
             # Large tensor on GPU: process in chunks with OOM protection
-            debug(f"      [HADAMARD-DEVICE] Using chunked dequantization (size={tensor_size}, chunk_size={chunk_size})")
+            debug(f"      Hadamard: Using chunked dequantization (size={tensor_size}, chunk_size={chunk_size})")
             
             try:
                 W_dequant_transformed = torch.empty_like(Q_prime_ordered, dtype=torch.float32, device=calc_device)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"      [OOM-FALLBACK] GPU OOM allocating output tensor, falling back to CPU")
+                verbose(f"      OOM fallback: GPU OOM allocating output tensor, falling back to CPU")
                 self._report_oom('dequant_alloc', tensor_size)
-                torch.cuda.empty_cache()
+                maybe_empty_cache(force=True)
                 calc_device = "cpu"
                 # Move input to CPU for processing
                 Q_prime_ordered = Q_prime_ordered.cpu()
@@ -1063,12 +1426,13 @@ class QuIPInt8Converter:
                         scale_chunk = scale_chunk.to(W_dequant_transformed.device)
                     W_dequant_transformed[row_start:row_end] = chunk * scale_chunk
                     del chunk  # Free intermediate
-                    if calc_device == "cuda" and row_start % (chunk_size * 4) == 0:  # Periodic cleanup
-                        torch.cuda.empty_cache()
+                    # Periodic cleanup (conditional, less frequent)
+                    if calc_device == "cuda" and row_start % (chunk_size * 16) == 0:
+                        maybe_empty_cache(pressure_threshold=0.92)
                 except torch.cuda.OutOfMemoryError:
-                    verbose(f"      [OOM-RECOVERY] GPU OOM at row {row_start}, switching to CPU for remaining chunks")
+                    verbose(f"      OOM recovery: GPU OOM at row {row_start}, switching to CPU for remaining chunks")
                     self._report_oom('dequant_chunk', chunk_size * Q_prime_ordered.shape[1])
-                    torch.cuda.empty_cache()
+                    maybe_empty_cache(force=True)
                     # Move remaining processing to CPU
                     if calc_device == "cuda":
                         calc_device = "cpu"
@@ -1087,11 +1451,11 @@ class QuIPInt8Converter:
             try:
                 W_dequant_transformed = Q_prime_ordered.to(torch.float32).to(calc_device) * scale.to(calc_device)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"      [OOM-FALLBACK] GPU OOM during dequantization, falling back to CPU")
+                verbose(f"      OOM fallback: GPU OOM during dequantization, falling back to CPU")
                 # Report OOM to adaptive manager for learning
                 self._report_oom('hadamard', Q_prime_ordered.numel())
                 import gc
-                torch.cuda.empty_cache()
+                maybe_empty_cache(force=True)
                 gc.collect()
                 # Process on CPU
                 Q_cpu = Q_prime_ordered.cpu()
@@ -1100,41 +1464,91 @@ class QuIPInt8Converter:
                 calc_device = "cpu"
         
         if s_u is not None and s_v is not None:
+            # Undo permutation BEFORE inverse Hadamard (correct inverse order)
+            # Forward pass: Hadamard -> Permute, so Inverse must be: Unpermute -> InvHadamard
+            W_undo = W_dequant_transformed
+            if rand_perm is not None:
+                verbose("Undoing random permutation")
+                try:
+                    W_undo = self._undo_permutation(W_undo, rand_perm.to(W_undo.device))
+                except torch.cuda.OutOfMemoryError:
+                    verbose(f"      OOM fallback: GPU OOM during undo permutation, falling back to CPU")
+                    self._report_oom('undo_permutation', W_undo.numel())
+                    maybe_empty_cache(force=True)
+                    # Move to CPU and retry
+                    calc_device = "cpu"
+                    W_undo_cpu = W_undo.cpu()
+                    rand_perm_cpu = rand_perm.cpu()
+                    W_undo = self._undo_permutation(W_undo_cpu, rand_perm_cpu)
+            
             # Inverse transform using working version's approach:
             # 1. Apply Hadamard to rows
             # 2. Apply Hadamard to columns (via transpose)
             # 3. Apply signs AFTER Hadamard
-            
             try:
-                W_undo = fast_hadamard_transform(W_dequant_transformed)
+                W_undo = fast_hadamard_transform(W_undo)
                 W_undo = fast_hadamard_transform(W_undo.t()).t()
                 W_undo = W_undo * s_u.to(calc_device).view(-1, 1) * s_v.to(calc_device).view(1, -1)
             except torch.cuda.OutOfMemoryError:
-                verbose(f"      [OOM-FALLBACK] GPU OOM during Hadamard inverse transform, falling back to CPU")
-                self._report_oom('hadamard_inverse', W_dequant_transformed.numel())
-                torch.cuda.empty_cache()
+                verbose(f"      OOM fallback: GPU OOM during Hadamard inverse transform, falling back to CPU")
+                self._report_oom('hadamard_inverse', W_undo.numel())
+                maybe_empty_cache(force=True)
                 # Move to CPU and retry
                 calc_device = "cpu"
-                W_cpu = W_dequant_transformed.cpu()
+                W_cpu = W_undo.cpu()
                 s_u_cpu = s_u.cpu()
                 s_v_cpu = s_v.cpu()
                 W_undo = fast_hadamard_transform(W_cpu)
                 W_undo = fast_hadamard_transform(W_undo.t()).t()
                 W_undo = W_undo * s_u_cpu.view(-1, 1) * s_v_cpu.view(1, -1)
             
-            # Slice to original dimensions
+            # Slice to original dimensions (after permutation undo, before rescaling undo)
             dequantized_weight = W_undo[:M_orig, :N_orig].contiguous()
+            
+            # Undo diagonal rescaling AFTER slicing
+            # Rescaling was applied BEFORE padding (to original dims), so undo must apply
+            # to sliced tensor (original dims)
+            if D_tilde is not None:
+                verbose("Undoing diagonal rescaling")
+                dequantized_weight = self._undo_diagonal_rescaling(dequantized_weight, D_tilde.to(dequantized_weight.device))
         else:
             try:
-                dequantized_weight = U.t().to(calc_device) @ W_dequant_transformed @ V.to(calc_device)
-                dequantized_weight = dequantized_weight[:M_orig, :N_orig].contiguous()
+                W_undo = U.t().to(calc_device) @ W_dequant_transformed @ V.to(calc_device)
+                # For non-Hadamard path: undo permutation before slicing, then slice, then undo rescaling
+                if rand_perm is not None:
+                    verbose("Undoing random permutation")
+                    try:
+                        W_undo = self._undo_permutation(W_undo, rand_perm.to(W_undo.device))
+                    except torch.cuda.OutOfMemoryError:
+                        verbose(f"      OOM fallback: GPU OOM during undo permutation (non-Hadamard), falling back to CPU")
+                        self._report_oom('undo_permutation', W_undo.numel())
+                        torch.cuda.empty_cache()
+                        calc_device = "cpu"
+                        W_undo = W_undo.cpu()
+                        rand_perm_cpu = rand_perm.cpu()
+                        W_undo = self._undo_permutation(W_undo, rand_perm_cpu)
+                # Slice to original dimensions
+                dequantized_weight = W_undo[:M_orig, :N_orig].contiguous()
+                # Undo rescaling after slicing (rescaling was applied to original dims)
+                if D_tilde is not None:
+                    verbose("Undoing diagonal rescaling")
+                    dequantized_weight = self._undo_diagonal_rescaling(dequantized_weight, D_tilde.to(dequantized_weight.device))
             except torch.cuda.OutOfMemoryError:
-                verbose(f"      [OOM-FALLBACK] GPU OOM during orthogonal inverse transform, falling back to CPU")
+                verbose(f"      OOM fallback: GPU OOM during orthogonal inverse transform, falling back to CPU")
                 self._report_oom('ortho_inverse', W_dequant_transformed.numel())
-                torch.cuda.empty_cache()
+                maybe_empty_cache(force=True)
                 calc_device = "cpu"
-                dequantized_weight = U.t().cpu() @ W_dequant_transformed.cpu() @ V.cpu()
-                dequantized_weight = dequantized_weight[:M_orig, :N_orig].contiguous()
+                W_undo = U.t().cpu() @ W_dequant_transformed.cpu() @ V.cpu()
+                # For non-Hadamard path: undo permutation before slicing, then slice, then undo rescaling
+                if rand_perm is not None:
+                    verbose("Undoing random permutation")
+                    W_undo = self._undo_permutation(W_undo, rand_perm_cpu if 'rand_perm_cpu' in locals() else rand_perm.cpu())
+                # Slice to original dimensions
+                dequantized_weight = W_undo[:M_orig, :N_orig].contiguous()
+                # Undo rescaling after slicing (rescaling was applied to original dims)
+                if D_tilde is not None:
+                    verbose("Undoing diagonal rescaling")
+                    dequantized_weight = self._undo_diagonal_rescaling(dequantized_weight, D_tilde.to(dequantized_weight.device))
 
         # 10. Undo SmoothQuant transformation if it was applied
         if smooth_factors is not None:
@@ -1146,6 +1560,30 @@ class QuIPInt8Converter:
             # The weight was quantized with per-row scales, so we need to return them
             final_scale = scale
             
+            # Undo the random permutation (rand_perm) for the stored weights
+            if rand_perm is not None:
+                verbose(f"      [DEBUG] Undoing random permutation for stored transformed weights (dim={N})")
+                # Step 8 only undid ActOrder. If we don't undo rand_perm, the stored weights
+                # will be in a randomly permuted order that the inference engine doesn't know.
+                
+                # FIX: Unpermute at padded width (the width rand_perm was created for), then slice.
+                # This ensures inv_perm indices are valid and prevents constant-color corruption.
+                N_perm = rand_perm.numel()  # Padded size the permutation was created for
+                if Q_prime_ordered.shape[1] < N_perm:
+                    # Right-pad Q_prime_ordered back to N_perm columns (zeros are correct padding)
+                    padding_cols = N_perm - Q_prime_ordered.shape[1]
+                    Q_prime_ordered = torch.nn.functional.pad(
+                        Q_prime_ordered, (0, padding_cols), mode='constant', value=0
+                    )
+                    verbose(f"      [DEBUG] Padded Q_prime_ordered from {Q_prime_ordered.shape[1] - padding_cols} to {N_perm} columns for unpermutation")
+                
+                Q_prime_ordered = self._undo_permutation(Q_prime_ordered, rand_perm.to(Q_prime_ordered.device))
+                verbose(f"      [DEBUG] Random permutation undid. Shape: {Q_prime_ordered.shape}, First 5 elements of row 0: {Q_prime_ordered[0, :5].tolist()}")
+                
+                # NOTE: Do NOT slice here. Keep padded to match Hadamard metadata sizes
+                # (hadamard_size_in/out computed below). The inference engine expects
+                # weights at padded dimensions for correct Hadamard-QuIP processing.
+            
             # Compute padded dimensions for Hadamard-QuIP metadata
             if self.use_hadamard:
                 from ..utils.hadamard import next_power_of_two
@@ -1156,13 +1594,13 @@ class QuIPInt8Converter:
                 hadamard_size_in = 0
             
             return (
-                Q_prime_ordered.cpu().contiguous(),
-                final_scale.cpu().to(SCALE_DTYPE),
-                dequantized_weight.cpu().contiguous(),
-                smooth_factors.cpu() if smooth_factors is not None else None,
+                Q_prime_ordered.contiguous(),
+                final_scale.to(SCALE_DTYPE),
+                dequantized_weight.contiguous(),
+                smooth_factors if smooth_factors is not None else None,
                 # Keep sign vectors at padded dimensions for Hadamard-QuIP!
-                s_u.cpu() if s_u is not None else None,
-                s_v.cpu() if s_v is not None else None,
+                s_u if s_u is not None else None,
+                s_v if s_v is not None else None,
                 # Hadamard-QuIP metadata (only when using Hadamard)
                 True if self.use_hadamard else False,  # hadamard_quip flag
                 hadamard_size_out,
@@ -1171,92 +1609,75 @@ class QuIPInt8Converter:
         
         # Re-quantize to original space for compatibility with standard inference kernels
         if self.device == "cuda":
-            torch.cuda.empty_cache()
+            maybe_empty_cache(pressure_threshold=0.90)
         
-        final_abs_max = dequantized_weight.abs().max()
-        final_scale = (final_abs_max / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
+        M_total, N_total = dequantized_weight.shape
         
-        # Use chunked processing for large tensors to avoid OOM
-        tensor_size = dequantized_weight.numel()
+        # Choose re-quantization scheme: "tensor" (default) or "block"
+        use_blockwise = (self.requant_scheme == "block") and (N_total % self.block_size == 0)
         
-        # For large tensors, process in chunks to keep memory usage bounded
-        # Lowered threshold to match 'balanced' tier (33M elements = ~128MB)
-        if tensor_size > 33_000_000 and dequantized_weight.device.type == "cuda":
-            chunk_rows = 2048  # Process 2048 rows at a time
-            M_total = dequantized_weight.shape[0]
+        if use_blockwise:
+            # Block-wise scaling for re-quantization to preserve precision (critical for LoRA)
+            verbose(f"      Re-quantizing to original space using block-wise scaling (bs={self.block_size})")
+            W_reshaped = dequantized_weight.view(M_total, N_total // self.block_size, self.block_size)
+            abs_max_blocks = W_reshaped.abs().amax(dim=2, keepdim=True)
+            final_scale = (abs_max_blocks / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
             
-            # Pre-allocate output tensor
-            Q_final_int8 = torch.empty_like(dequantized_weight, dtype=torch.int8, device=dequantized_weight.device)
+            # Quantize using block-wise scales
+            Q_final_int8 = torch.round(W_reshaped / final_scale).clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX).to(torch.int8)
+            Q_final_int8 = Q_final_int8.view(M_total, N_total)
             
-            for row_start in range(0, M_total, chunk_rows):
-                row_end = min(row_start + chunk_rows, M_total)
-                
-                # Process chunk: dequantized_weight[row_start:row_end] / final_scale
-                chunk = dequantized_weight[row_start:row_end]
-                scale_chunk = final_scale[row_start:row_end] if final_scale.dim() > 0 and final_scale.shape[0] == M_total else final_scale
-                
-                # Ensure same device
-                if chunk.device != Q_final_int8.device:
-                    chunk = chunk.to(Q_final_int8.device)
-                if scale_chunk.device != Q_final_int8.device:
-                    scale_chunk = scale_chunk.to(Q_final_int8.device)
-                
-                # Step-by-step with explicit memory management
-                divided = chunk / scale_chunk
-                rounded = torch.round(divided)
-                del divided  # Free intermediate
-                
-                clamped = rounded.clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX)
-                del rounded  # Free intermediate
-                
-                Q_final_int8[row_start:row_end] = clamped.to(torch.int8)
-                del clamped  # Free intermediate
-                
-                # Periodic cleanup every few chunks
-                if (row_start // chunk_rows) % 4 == 0:
-                    torch.cuda.empty_cache()
+            verbose(f"      [DEBUG] Final scale shape: {final_scale.shape}")
         else:
-            # Small tensor: process normally but with explicit steps to avoid chained intermediates
-            # Add OOM protection - fall back to CPU if GPU runs out of memory
-            try:
-                divided = dequantized_weight / final_scale
-                rounded = torch.round(divided)
-                del divided  # Free intermediate immediately
-                
-                clamped = rounded.clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX)
-                del rounded  # Free intermediate immediately
-                
-                Q_final_int8 = clamped.to(torch.int8)
-                del clamped  # Free intermediate
-            except torch.cuda.OutOfMemoryError:
-                verbose(f"      [OOM-FALLBACK] GPU OOM during final quantization, falling back to CPU")
-                # Report OOM to adaptive manager for learning
-                self._report_oom('hadamard', dequantized_weight.numel())
-                import gc
-                torch.cuda.empty_cache()
-                gc.collect()
-                # Process on CPU
-                dw_cpu = dequantized_weight.cpu()
-                scale_cpu = final_scale.cpu() if final_scale.dim() > 0 else final_scale
-                divided = dw_cpu / scale_cpu
-                rounded = torch.round(divided)
-                clamped = rounded.clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX)
-                Q_final_int8 = clamped.to(torch.int8)
-                # Move back to GPU if possible
+            # Tensor-wise scaling - can use per-row or global scale
+            if self.requant_scheme == "block" and N_total % self.block_size != 0:
+                verbose(f"      Re-quantizing to original space using tensor-wise scaling (N={N_total} not divisible by {self.block_size})")
+            else:
+                verbose(f"      Re-quantizing to original space using tensor-wise scaling")
+            
+            # Use per-row scales if requested (better precision, matches LDLQ quantization)
+            if self.requant_tensor_use_per_row_scale:
+                verbose(f"      Using per-row scales for tensor-wise requantization")
+                abs_max_per_row = dequantized_weight.abs().amax(dim=1, keepdim=True)
+                final_scale = (abs_max_per_row / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
+            else:
+                # Simple single global scale
+                verbose(f"      Using global scale for tensor-wise requantization")
+                final_abs_max = dequantized_weight.abs().max()
+                final_scale = (final_abs_max / INT8_SYMMETRIC_MAX).clamp(min=1e-12)
+            
+            # Use chunked processing for large tensors to avoid OOM
+            tensor_size = dequantized_weight.numel()
+            if tensor_size > 33_000_000 and dequantized_weight.device.type == "cuda":
+                chunk_rows = 2048
+                Q_final_int8 = torch.empty_like(dequantized_weight, dtype=torch.int8, device=dequantized_weight.device)
+                for row_start in range(0, M_total, chunk_rows):
+                    row_end = min(row_start + chunk_rows, M_total)
+                    chunk = dequantized_weight[row_start:row_end]
+                    # Handle per-row scales (shape [M, 1]) vs global scale (scalar)
+                    if final_scale.dim() >= 1 and final_scale.shape[0] == M_total:
+                        scale_chunk = final_scale[row_start:row_end]
+                    else:
+                        scale_chunk = final_scale
+                    Q_final_int8[row_start:row_end] = torch.round(chunk / scale_chunk).clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX).to(torch.int8)
+            else:
                 try:
-                    Q_final_int8 = Q_final_int8.to(self.device)
+                    Q_final_int8 = torch.round(dequantized_weight / final_scale).clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX).to(torch.int8)
                 except torch.cuda.OutOfMemoryError:
-                    pass  # Keep on CPU
+                    self._report_oom('requant', dequantized_weight.numel())
+                    maybe_empty_cache(force=True)
+                    Q_final_int8 = torch.round(dequantized_weight.cpu() / final_scale.cpu()).clamp(-INT8_SYMMETRIC_MAX, INT8_SYMMETRIC_MAX).to(torch.int8).to(self.device)
         
         # Return with Hadamard-QuIP metadata (flag as False since we're not storing transformed)
         return (
-            Q_final_int8.cpu().contiguous(),
-            final_scale.cpu().to(SCALE_DTYPE),
-            dequantized_weight.cpu().contiguous(),
-            smooth_factors.cpu() if smooth_factors is not None else None,
+            Q_final_int8.contiguous(),
+            final_scale.to(SCALE_DTYPE),
+            dequantized_weight.contiguous(),
+            smooth_factors if smooth_factors is not None else None,
             None, # s_u not needed for standard storage
             None, # s_v not needed for standard storage
             False, # hadamard_quip flag (False for standard storage)
             0,     # hadamard_size_out
             0,     # hadamard_size_in
         )
+

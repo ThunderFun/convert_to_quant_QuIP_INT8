@@ -25,28 +25,34 @@ class StreamingConfig:
     # Predefined tier thresholds
     TIERS: Dict[str, StreamingThresholds] = {
         'off': StreamingThresholds(
-            hadamard_elements=float('inf'),
-            hessian_dim=float('inf'),
-            ldlq_dim=float('inf'),
-            ortho_dim=float('inf')
+            hadamard_elements=10**15,
+            hessian_dim=10**15,
+            ldlq_dim=10**15,
+            ortho_dim=10**15
         ),
         'minimal': StreamingThresholds(
-            hadamard_elements=100_000_000,  # ~400MB
-            hessian_dim=16384,
-            ldlq_dim=32768,
+            hadamard_elements=150_000_000,  # ~600MB
+            hessian_dim=32768,              # Increased: Block Cholesky handles large N
+            ldlq_dim=65536,                 # Increased: Tiled propagation handles large N
             ortho_dim=16384
         ),
         'balanced': StreamingThresholds(
-            hadamard_elements=50_000_000,   # ~200MB (was 33M)
-            hessian_dim=6144,               # Was 4096
-            ldlq_dim=12288,                 # Was 8192
-            ortho_dim=6144                  # Was 4096
+            hadamard_elements=100_000_000,  # ~400MB
+            hessian_dim=24576,              # Increased: Block Cholesky handles large N
+            ldlq_dim=49152,                 # Increased: Tiled propagation handles large N
+            ortho_dim=12288
         ),
         'aggressive': StreamingThresholds(
-            hadamard_elements=25_000_000,   # ~100MB - more aggressive offloading
-            hessian_dim=4096,               # Lower threshold for Hessian
-            ldlq_dim=8192,                  # Lower threshold for LDLQ
-            ortho_dim=4096                  # Lower threshold for orthogonal
+            hadamard_elements=25_000_000,   # ~100MB
+            hessian_dim=8192,               # Increased: Block Cholesky handles large N
+            ldlq_dim=16384,                 # Increased: Tiled propagation handles large N
+            ortho_dim=4096
+        ),
+        'extreme': StreamingThresholds(
+            hadamard_elements=12_500_000,   # ~50MB - very aggressive offloading
+            hessian_dim=2048,
+            ldlq_dim=4096,
+            ortho_dim=2048
         ),
     }
     
@@ -88,24 +94,37 @@ class StreamingConfig:
             Recommended tier name based on VRAM:
             - 'minimal' for < 6GB VRAM (conservative, memory-safe)
             - 'balanced' for 6-12GB VRAM (good performance/safety tradeoff)
-            - 'aggressive' for > 12GB VRAM (maximum performance)
+            - 'aggressive' for 12-20GB VRAM (high performance)
+            - 'extreme' for > 20GB VRAM (maximum performance)
         """
         if vram_gb is None:
             if not torch.cuda.is_available():
                 return 'balanced'
             try:
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                vram_gb = total_memory / (1024**3)  # Convert to GB correctly (not 1e9)
+                # Use free memory if available, otherwise total memory
+                # This is more accurate if other processes are using the GPU
+                free_mem, total_mem = torch.cuda.mem_get_info(0)
+                
+                # Use a more conservative estimate:
+                # We take the minimum of (total memory) and (free memory + 2GB buffer for cache)
+                # This prevents choosing a high tier when free memory is very low,
+                # while still allowing for some cache reclamation.
+                effective_free = free_mem + (2 * 1024**3) # Assume we can reclaim 2GB of cache
+                vram_gb = min(total_mem, effective_free) / (1024**3)
             except Exception:
-                return 'balanced'
+                try:
+                    total_memory = torch.cuda.get_device_properties(0).total_memory
+                    vram_gb = total_memory / (1024**3)
+                except Exception:
+                    return 'balanced'
         
         # Check if BF16 is available (Ampere+ GPUs)
         bf16_available = _get_bf16_if_supported() == torch.bfloat16
         
         # BF16 saves ~50% memory on compute operations, so we can be more aggressive.
-        # Adjust thresholds as if we have +5GB VRAM when BF16 is available.
-        # This shifts 8GB GPUs to 'aggressive' tier for maximum performance.
-        effective_vram = vram_gb + (5.0 if bf16_available else 0.0)
+        # Adjust thresholds conservatively as if we have +2GB VRAM when BF16 is available.
+        # This provides realistic memory savings without overcommitting GPU memory.
+        effective_vram = vram_gb + (2.0 if bf16_available else 0.0)
         
         # Aggressive auto-detection with memory optimizations:
         # - Pinned memory pool for efficient CPU<->GPU transfers
@@ -118,13 +137,67 @@ class StreamingConfig:
             return 'minimal'      # Conservative for very low VRAM (< 6GB)
         elif effective_vram <= 12:
             return 'balanced'     # Balanced for mid-range (6-12GB)
+        elif effective_vram <= 20:
+            return 'aggressive'   # Aggressive for high VRAM (12-20GB)
         else:
-            return 'aggressive'   # Aggressive for high VRAM (> 12GB)
+            return 'extreme'      # Extreme for ultra-high VRAM (> 20GB)
     
     @classmethod
     def get_available_tiers(cls) -> list:
         """Get list of available tier names."""
         return list(cls.TIERS.keys())
+    
+    @classmethod
+    def get_safety_threshold(cls, tier: str) -> int:
+        """Get safety threshold for Hadamard transform based on tier.
+        
+        This threshold is used as a hard limit to force CPU usage for extremely
+        large tensors, even if the adaptive manager is optimistic.
+        
+        Args:
+            tier: Tier name
+            
+        Returns:
+            Threshold in elements
+        """
+        # Base safety thresholds (FP32 elements)
+        # Higher tiers allow larger tensors on GPU
+        safety_map = {
+            'off': 10**15,            # Use a very large integer instead of float('inf')
+            'minimal': 50_000_000,    # ~200MB
+            'balanced': 75_000_000,   # ~300MB
+            'aggressive': 150_000_000, # ~600MB
+            'extreme': 300_000_000,    # ~1.2GB
+        }
+        
+        base_threshold = safety_map.get(tier, 75_000_000)
+        
+        # Adjust for BF16 if available
+        bf16_available = _get_bf16_if_supported() == torch.bfloat16
+        
+        # Handle infinity or very large values safely
+        # Use math.isinf for robustness
+        import math as py_math
+        
+        # Ensure base_threshold is a number
+        try:
+            base_threshold = float(base_threshold)
+        except (ValueError, TypeError):
+            base_threshold = 75_000_000.0
+            
+        if py_math.isinf(base_threshold) or py_math.isnan(base_threshold) or base_threshold > 10**14:
+            return 10**15
+            
+        if bf16_available:
+            # CRITICAL: Ensure we don't multiply infinity by 2.0 before checking
+            try:
+                val = base_threshold * 2.0
+                if py_math.isinf(val):
+                    return 10**15
+                return int(val)
+            except (OverflowError, ValueError):
+                return 10**15
+        return int(base_threshold)
 
 
 class AdaptiveStreamingManager:
@@ -150,12 +223,12 @@ class AdaptiveStreamingManager:
     """
     
     # Memory pressure thresholds (fraction of total VRAM)
-    # More aggressive thresholds with memory optimizations:
-    # - Pinned pool, buffer pool, OOM guard, chunked Hadamard, FP16
-    MEMORY_CRITICAL = 0.95  # Above this, use CPU aggressively (was 0.90)
-    MEMORY_HIGH = 0.85      # Above this, lower thresholds (was 0.75)
-    MEMORY_NORMAL = 0.60    # Above this, use balanced thresholds (was 0.50)
-    MEMORY_LOW = 0.40       # Below this, can be more aggressive (was 0.30)
+    # Conservative thresholds to leave headroom for driver and other applications:
+    # - Leave 10-12% VRAM headroom to prevent driver crashes
+    MEMORY_CRITICAL = 0.90  # Above this, use CPU aggressively (10% headroom)
+    MEMORY_HIGH = 0.80      # Above this, lower thresholds (20% headroom)
+    MEMORY_NORMAL = 0.70    # Above this, use balanced thresholds
+    MEMORY_LOW = 0.50       # Below this, can be more aggressive
     
     # Adjustment factors for thresholds
     ADJUSTMENT_UP = 1.15    # Increase threshold by 15%
@@ -212,43 +285,60 @@ class AdaptiveStreamingManager:
         # Tracking state
         self._last_memory_check: float = 0.0
         self._last_memory_pressure: float = 0.0
+        self._last_free_memory: int = 0
+        self._last_total_memory: int = 0
         self._oom_history: List[Dict] = []
         self._decision_history: List[Dict] = []
         self._total_operations: int = 0
         self._gpu_operations: int = 0
         self._cpu_operations: int = 0
         
-    def _get_memory_pressure(self, force_refresh: bool = False) -> float:
-        """Get current GPU memory pressure as a fraction (0.0 - 1.0).
+    def _get_memory_info(self, force_refresh: bool = False) -> Tuple[float, int, int]:
+        """Get current GPU memory info.
         
         Args:
             force_refresh: If True, ignore cache and fetch fresh value.
-                          Use for critical decisions where stale data is unacceptable.
         
         Returns:
-            Memory pressure: allocated_memory / total_memory
-            Returns 0.0 if CUDA is not available.
+            Tuple of (pressure, free_bytes, total_bytes)
         """
         if not torch.cuda.is_available():
-            return 0.0
+            return 0.0, 0, 0
         
-        # Rate limit checks (unless force_refresh is True)
         current_time = time.time()
         time_since_last = current_time - self._last_memory_check
         
-        if not force_refresh and time_since_last < self.memory_check_interval:
-            return self._last_memory_pressure
+        # Dynamic check interval: check more frequently when pressure is high
+        effective_interval = self.memory_check_interval
+        if self._last_memory_pressure > self.MEMORY_HIGH:
+            effective_interval /= 4.0 # Check 4x more often
+        elif self._last_memory_pressure > self.MEMORY_NORMAL:
+            effective_interval /= 2.0 # Check 2x more often
+            
+        if not force_refresh and time_since_last < effective_interval:
+            return self._last_memory_pressure, self._last_free_memory, self._last_total_memory
         
         self._last_memory_check = current_time
         
         try:
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            allocated_memory = torch.cuda.memory_allocated(0)
-            pressure = allocated_memory / total_memory
+            # Use mem_get_info for actual free memory (including unreserved)
+            free_mem, total_mem = torch.cuda.mem_get_info(0)
+            reserved_mem = torch.cuda.memory_reserved(0)
+            
+            # Pressure is still based on reserved vs total for stability
+            pressure = reserved_mem / total_mem
+            
             self._last_memory_pressure = pressure
-            return pressure
+            self._last_free_memory = free_mem
+            self._last_total_memory = total_mem
+            return pressure, free_mem, total_mem
         except Exception:
-            return self._last_memory_pressure
+            return self._last_memory_pressure, getattr(self, '_last_free_memory', 0), getattr(self, '_last_total_memory', 0)
+
+    def _get_memory_pressure(self, force_refresh: bool = False) -> float:
+        """Get current GPU memory pressure as a fraction (0.0 - 1.0)."""
+        pressure, _, _ = self._get_memory_info(force_refresh)
+        return pressure
     
     def _adjust_threshold(self, current: float, target_multiplier: float, min_val: float, max_val: float) -> float:
         """Adjust a threshold towards a target multiplier of base.
@@ -272,38 +362,59 @@ class AdaptiveStreamingManager:
         # Clamp to bounds
         return max(min_val, min(max_val, new_value))
     
+    def refresh_base_tier(self):
+        """Dynamically refresh the base tier based on current environment."""
+        if not self.enable_adaptation:
+            return
+            
+        new_tier = StreamingConfig.auto_detect_tier()
+        if new_tier != self.base_tier:
+            from ..utils.logging import verbose
+            verbose(f"Adaptive Manager: Switching base tier from {self.base_tier} to {new_tier}")
+            self.base_tier = new_tier
+            self._base_thresholds = StreamingConfig.get_thresholds(new_tier)
+            # Update max thresholds too
+            self._max_thresholds = StreamingThresholds(
+                hadamard_elements=float(self._base_thresholds.hadamard_elements) * 2,
+                hessian_dim=float(self._base_thresholds.hessian_dim) * 2,
+                ldlq_dim=float(self._base_thresholds.ldlq_dim) * 2,
+                ortho_dim=float(self._base_thresholds.ortho_dim) * 2,
+            )
+
     def update_thresholds(self):
-        """Update all thresholds based on current memory pressure."""
+        """Update all thresholds based on current memory pressure and available VRAM."""
         if not self.enable_adaptation or not torch.cuda.is_available():
             return
         
-        pressure = self._get_memory_pressure()
+        # Periodically refresh base tier to account for external memory changes
+        self.refresh_base_tier()
         
-        # Determine target multiplier based on memory pressure
-        # Lower pressure = higher thresholds = more GPU usage
-        # Set directly rather than gradually adjusting for more responsive behavior
-        # With memory optimizations, we can be more aggressive at all levels
+        pressure, free_mem, total_mem = self._get_memory_info()
+        
+        # 1. Pressure-based multiplier (more granular)
         if pressure >= self.MEMORY_CRITICAL:
-            # Critical: Use conservative thresholds (50% of base, was 40%)
             target_multiplier = 0.5
         elif pressure >= self.MEMORY_HIGH:
-            # High: Use slightly conservative thresholds (75% of base, was 60%)
             target_multiplier = 0.75
         elif pressure >= 0.70:
-            # Moderately high: Near base (90% of base, was 80%)
             target_multiplier = 0.9
         elif pressure >= self.MEMORY_NORMAL:
-            # Normal: Use base thresholds (100% of base)
             target_multiplier = 1.0
         elif pressure >= 0.45:
-            # Low (45-60%): Be aggressive (175% of base, was 150%)
-            target_multiplier = 1.75
+            target_multiplier = 1.3
         elif pressure >= self.MEMORY_LOW:
-            # Very low (40-45%): Be very aggressive (250% of base, was 200%)
-            target_multiplier = 2.5
+            target_multiplier = 1.6
         else:
-            # Extremely low (<40%): Be extremely aggressive (400% of base, was 300%)
-            target_multiplier = 4.0
+            target_multiplier = 2.2
+            
+        # 2. Direct memory-based adjustment
+        # If we have lots of free memory, we can be even more aggressive
+        # regardless of the "pressure" (which is reserved/total)
+        free_gb = free_mem / (1024**3)
+        if free_gb > 8.0:
+            target_multiplier *= 1.2
+        elif free_gb < 1.0:
+            target_multiplier *= 0.8
         
         # Apply multipliers directly to base thresholds for immediate response
         base = self._base_thresholds
@@ -311,8 +422,8 @@ class AdaptiveStreamingManager:
         min_t = self._min_thresholds
         max_t = self._max_thresholds
         
-        current.hadamard_elements = max(min_t.hadamard_elements, 
-                                        min(max_t.hadamard_elements, 
+        current.hadamard_elements = max(min_t.hadamard_elements,
+                                        min(max_t.hadamard_elements,
                                             base.hadamard_elements * target_multiplier))
         current.hessian_dim = max(min_t.hessian_dim,
                                   min(max_t.hessian_dim,
@@ -340,9 +451,9 @@ class AdaptiveStreamingManager:
         if _get_bf16_if_supported() != torch.bfloat16:
             return 1.0
         
-        # All these operations benefit from BF16 memory savings.
-        # Use 3x multiplier for more aggressive GPU utilization.
-        return 3.0
+        # BF16 uses half the memory of FP32, so we can handle 2x larger tensors
+        # Use conservative 2x multiplier (not 3x) to avoid overcommitting memory
+        return 2.0
     
     def get_hadamard_threshold(self) -> float:
         """Get current adaptive Hadamard threshold."""
@@ -534,23 +645,23 @@ class AdaptiveStreamingManager:
         
         # Apply memory pressure multiplier
         # Higher pressure = more aggressive about using CPU
-        # Lower pressure = can be much more aggressive with GPU
-        # With memory optimizations, favor GPU more aggressively
+        # Lower pressure = can be more aggressive with GPU
+        # Conservative factors to leave headroom for driver/other apps
         pressure = self._get_memory_pressure()
         if pressure >= self.MEMORY_CRITICAL:
-            pressure_factor = 2.5  # Strongly favor CPU (was 3.0)
+            pressure_factor = 2.0  # Strongly favor CPU
         elif pressure >= self.MEMORY_HIGH:
-            pressure_factor = 1.75  # Favor CPU (was 2.0)
+            pressure_factor = 1.5  # Favor CPU
         elif pressure >= 0.70:
-            pressure_factor = 1.25  # Slightly favor CPU (was 1.5)
+            pressure_factor = 1.2  # Slightly favor CPU
         elif pressure >= self.MEMORY_NORMAL:
-            pressure_factor = 0.9  # Slightly favor GPU (was 1.0)
+            pressure_factor = 1.0  # Balanced
         elif pressure >= 0.45:
-            pressure_factor = 0.5  # Favor GPU - 50% more aggressive (was 0.6)
+            pressure_factor = 0.8  # Slightly favor GPU
         elif pressure >= self.MEMORY_LOW:
-            pressure_factor = 0.3  # Strongly favor GPU - 70% more aggressive (was 0.4)
+            pressure_factor = 0.7  # Favor GPU
         else:
-            pressure_factor = 0.2  # Very strongly favor GPU - 80% more aggressive
+            pressure_factor = 0.6  # Moderately favor GPU (capped to avoid over-allocation)
         
         # Adjusted ratio considering memory pressure
         adjusted_ratio = ratio * pressure_factor
@@ -647,8 +758,15 @@ class AdaptiveStreamingManager:
         
         # Force CPU if memory pressure is critical regardless of score
         # Use force_refresh=True for this critical safety check
-        if self._get_memory_pressure(force_refresh=True) >= self.MEMORY_CRITICAL:
+        pressure = self._get_memory_pressure(force_refresh=True)
+        if pressure >= self.MEMORY_CRITICAL:
             use_cpu = True
+            
+        # Log a warning for large CPU operations as they will be slow
+        if use_cpu and operation in ('ldlq', 'hessian') and size > 4096:
+            from ..utils.logging import verbose
+            verbose(f"WARNING: High memory pressure ({pressure:.1%}) forcing {operation} to CPU. "
+                    f"This will be significantly slower than GPU.")
         
         return use_cpu
     

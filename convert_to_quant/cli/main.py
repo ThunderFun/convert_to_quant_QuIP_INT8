@@ -191,10 +191,31 @@ def main():
     parser.add_argument("--gptq-fast", action="store_true", default=True, help="Enable GPTQ vectorized processing.")
     parser.add_argument("--gptq-turbo", action="store_true", help="Enable GPTQ Triton kernel.")
  
-    parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP.")
-    parser.add_argument("--quip-hadamard", action="store_true", default=True, help="Use Hadamard transform for QuIP.")
+    parser.add_argument("--quip-actorder", action="store_true", default=True, help="Enable activation ordering for QuIP (default: True).")
+    parser.add_argument("--no-quip-actorder", action="store_false", dest="quip_actorder", help="Disable activation ordering for QuIP.")
+    parser.add_argument("--quip-hadamard", action="store_true", default=True, help="Use Hadamard transform for QuIP (default: True).")
+    parser.add_argument("--no-quip-hadamard", action="store_false", dest="quip_hadamard", help="Disable Hadamard transform for QuIP.")
     parser.add_argument("--quip-seed", type=int, default=None, help="Seed for QuIP random orthogonal matrices.")
     parser.add_argument("--quip-store-transformed", action="store_true", help="Store weights in transformed space (padded to Hadamard dimensions). Uses more memory but may improve inference speed.")
+    parser.add_argument(
+        "--quip-requant-scheme",
+        type=str,
+        default="tensor",
+        choices=["tensor", "block"],
+        help="Re-quantization scheme for QuIP when storing in original space. 'tensor' (default) produces int8_tensorwise format for maximum compatibility. 'block' uses block-wise scaling for potentially better precision."
+    )
+    parser.add_argument(
+        "--quip-requant-tensor-per-row",
+        action="store_true",
+        default=True,
+        help="Use per-row (channel-wise) scales for tensor-wise re-quantization (default: True). Improves precision by adapting to row-wise variations while maintaining tensor-wise format compatibility."
+    )
+    parser.add_argument(
+        "--no-quip-requant-tensor-per-row",
+        action="store_false",
+        dest="quip_requant_tensor_per_row",
+        help="Use single global scale for tensor-wise re-quantization (less precise but slightly faster)."
+    )
     
     # Checkpointed quantization for extreme memory savings
     parser.add_argument("--quip-checkpointed", action="store_true", help="Enable checkpointed LDLQ quantization for 75-90%% memory reduction on large layers.")
@@ -326,6 +347,8 @@ def main():
         optimizer=args.optimizer, num_iter=args.num_iter, lr=args.lr, lr_schedule=args.lr_schedule,
         quip_actorder=args.quip_actorder, quip_hadamard=args.quip_hadamard, quip_seed=args.quip_seed,
         quip_store_transformed=args.quip_store_transformed,
+        quip_requant_scheme=args.quip_requant_scheme,
+        quip_requant_tensor_per_row=args.quip_requant_tensor_per_row,
         quip_checkpointed=args.quip_checkpointed,
         quip_checkpoint_threshold=args.quip_checkpoint_threshold,
         quip_checkpoint_segments=args.quip_checkpoint_segments,

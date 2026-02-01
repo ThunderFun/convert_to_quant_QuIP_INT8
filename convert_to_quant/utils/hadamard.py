@@ -4,25 +4,14 @@ import math
 from typing import Optional, Dict
 import os
 
-# =============================================================================
-# OPTIMIZED HADAMARD TRANSFORM IMPLEMENTATION
-# =============================================================================
-# This module provides optimized Fast Hadamard Transform (FHT) implementations:
-# 1. Optimized PyTorch fallback (reduced allocations, in-place operations)
-# 2. Optional torch.compile with static shapes for repeated calls
-# 3. Triton kernels are in convert_to_quant.comfy.hadamard_kernels
-# 4. Mixed-precision (BF16/FP16 compute with FP32 accumulation) for ~50% bandwidth reduction
+# Fast Hadamard Transform (FHT) implementations:
+# - Optimized PyTorch fallback with reduced allocations
+# - Optional torch.compile with static shapes
+# - Triton kernels in convert_to_quant.comfy.hadamard_kernels
+# - Mixed-precision (BF16/FP16) for bandwidth reduction on Ampere+
 
-
-# =============================================================================
-# Mixed Precision Configuration
-# =============================================================================
-
-# Mixed precision configuration
-_ENABLE_MIXED_PRECISION = os.environ.get("ENABLE_MIXED_HADAMARD", "auto")  # "auto", "1", "0"
-_MIXED_PRECISION_DTYPE = os.environ.get("MIXED_HADAMARD_DTYPE", "bfloat16")  # "bfloat16", "float16"
-
-# Global flag set by quantization code when in low_memory mode
+_ENABLE_MIXED_PRECISION = os.environ.get("ENABLE_MIXED_HADAMARD", "auto")
+_MIXED_PRECISION_DTYPE = os.environ.get("MIXED_HADAMARD_DTYPE", "bfloat16")
 _LOW_MEMORY_MODE = False
 
 
@@ -87,31 +76,22 @@ def _get_mixed_precision_dtype() -> torch.dtype:
         return torch.float16
 
 
-# =============================================================================
 # Utility Functions
-# =============================================================================
 
 def is_power_of_two(n: int) -> bool:
-    """Check if n is a power of two."""
     return (n > 0) and (n & (n - 1) == 0)
 
 
 def next_power_of_two(n: int) -> int:
-    """Return the next power of two greater than or equal to n."""
     if n <= 0:
         return 1
     return 2**(n - 1).bit_length()
 
 
-# =============================================================================
-# Optimized PyTorch Implementation (Phase 1)
-# =============================================================================
+# Optimized PyTorch Implementation
 
 def _fast_hadamard_transform_core_v1(x: Tensor, n: int, normalize: bool = True) -> Tensor:
-    """
-    Original core Hadamard transform implementation (for comparison/baseline).
-    Uses torch.stack which creates new allocations each iteration.
-    """
+    """Original core implementation using torch.stack (baseline for comparison)."""
     original_shape = x.shape
     x = x.reshape(-1, n)
     
@@ -161,6 +141,9 @@ def _fast_hadamard_transform_core_optimized(x: Tensor, n: int, normalize: bool =
         a = x_view[:, :, 0, :].contiguous()
         b = x_view[:, :, 1, :]
         
+        # Butterfly operations in FP32 for speed
+        # Note: Previously used FP64 on CPU for numerical stability, but
+        # FP32 is significantly faster (~2x) and sufficient for inference
         out_view[:, :, 0, :] = a + b
         out_view[:, :, 1, :] = a - b
         
@@ -257,6 +240,13 @@ def _fast_hadamard_transform_core_mixed(
     
     # Final result: convert back to FP32
     result = x_low.float().reshape(original_shape)
+    
+    # DEBUG: Check for NaNs or zeros
+    if torch.isnan(result).any():
+        print(f"      [DEBUG] WARNING: NaNs detected in mixed-precision Hadamard transform (n={n})")
+    if (result == 0).all() and n > 1:
+        print(f"      [DEBUG] WARNING: All zeros detected in mixed-precision Hadamard transform (n={n})")
+        
     if normalize:
         result.mul_(1.0 / math.sqrt(n))
     
@@ -448,6 +438,12 @@ def fast_hadamard_transform_with_signs(
         # Clone once for signs + hadamard
         x = x.clone()
         
+        # Ensure x is on the same device as the signs to avoid device mismatch
+        if sign_row is not None and x.device != sign_row.device:
+            x = x.to(sign_row.device)
+        elif sign_col is not None and x.device != sign_col.device:
+            x = x.to(sign_col.device)
+        
         if sign_row is not None and sign_col is not None:
             # Both signs: x[i,j] *= row_signs[i] * col_signs[j]
             x.mul_(sign_row.unsqueeze(-1))
@@ -458,9 +454,14 @@ def fast_hadamard_transform_with_signs(
         elif sign_col is not None:
             # Column signs only
             x.mul_(sign_col.unsqueeze(-2))
+        
+        # Apply Hadamard transform in-place on the clone
+        return fast_hadamard_transform(x, normalize=normalize, inplace=True)
     
-    # Apply Hadamard transform
-    return fast_hadamard_transform(x, normalize=normalize, inplace=True)
+    # No signs: Apply Hadamard transform (not in-place to respect API contract)
+    # We must clone here because fast_hadamard_transform might still modify in-place
+    # if it's not careful, and we want to be absolutely sure.
+    return fast_hadamard_transform(x.clone(), normalize=normalize, inplace=True)
 
 
 def fast_hadamard_transform_2d(
@@ -509,8 +510,6 @@ def fast_hadamard_transform_2d(
         x = x / math.sqrt(n_rows * n_cols)
     
     return x
-
-
 
 
 # =============================================================================
@@ -661,61 +660,37 @@ def fast_hadamard_transform_2d_chunked_with_signs(
     if not is_power_of_two(n_rows) or not is_power_of_two(n_cols):
         raise ValueError(f"Dimensions must be powers of 2, got {n_rows} x {n_cols}")
     
-    # Pre-allocate output
-    result = torch.empty_like(x)
+    # FIXED: The previous chunked implementation was mathematically incorrect
+    # because it attempted to perform a row-wise Hadamard transform by chunking
+    # the row dimension. A Hadamard transform of size N requires all N elements
+    # to be present. For now, we fall back to the standard 2D transform for correctness.
+    import warnings
+    warnings.warn(
+        "fast_hadamard_transform_2d_chunked_with_signs is experimental and falls back to "
+        "standard 2D transform for correctness.",
+        UserWarning,
+        stacklevel=2
+    )
     
-    # Process in chunks, applying signs as we go
-    for row_start in range(0, n_rows, chunk_rows):
-        row_end = min(row_start + chunk_rows, n_rows)
-        
-        # Extract chunk
-        if x.ndim == 2:
-            chunk = x[row_start:row_end, :].clone()
-        else:
-            chunk = x[..., row_start:row_end, :].clone()
-        
-        # Apply signs
+    return fast_hadamard_transform_2d_chunked_with_signs_fallback(
+        x, sign_row, sign_col, normalize
+    )
+
+def fast_hadamard_transform_2d_chunked_with_signs_fallback(
+    x: Tensor,
+    sign_row: Optional[Tensor] = None,
+    sign_col: Optional[Tensor] = None,
+    normalize: bool = True
+) -> Tensor:
+    """Fallback implementation for 2D Hadamard with signs."""
+    if sign_row is not None or sign_col is not None:
+        x = x.clone()
         if sign_row is not None:
-            chunk.mul_(sign_row[row_start:row_end].view(-1, 1))
+            x.mul_(sign_row.view(*([1] * (x.ndim - 2)), -1, 1))
         if sign_col is not None:
-            chunk.mul_(sign_col.view(1, -1))
-        
-        # Apply column-wise Hadamard
-        chunk = fast_hadamard_transform(chunk, normalize=False, inplace=True)
-        
-        # Write intermediate result
-        if result.ndim == 2:
-            result[row_start:row_end, :] = chunk
-        else:
-            result[..., row_start:row_end, :] = chunk
-    
-    # Step 2: Apply row-wise transform in chunks
-    for row_start in range(0, n_rows, chunk_rows):
-        row_end = min(row_start + chunk_rows, n_rows)
-        
-        # Get chunk
-        if result.ndim == 2:
-            chunk = result[row_start:row_end, :]
-        else:
-            chunk = result[..., row_start:row_end, :]
-        
-        # Transpose, transform, transpose back
-        chunk_t = chunk.transpose(-2, -1)
-        transformed_t = fast_hadamard_transform(chunk_t, normalize=False, inplace=False)
-        
-        if result.ndim == 2:
-            result[row_start:row_end, :] = transformed_t.transpose(-2, -1)
-        else:
-            result[..., row_start:row_end, :] = transformed_t.transpose(-2, -1)
-        
-        del chunk_t, transformed_t
-        if x.is_cuda and row_start % (chunk_rows * 2) == 0:
-            torch.cuda.empty_cache()
-    
-    if normalize:
-        result.mul_(1.0 / math.sqrt(n_rows * n_cols))
-    
-    return result
+            x.mul_(sign_col.view(*([1] * (x.ndim - 2)), 1, -1))
+            
+    return fast_hadamard_transform_2d(x, normalize=normalize, inplace=True)
 
 def random_orthogonal_matrix(n: int, seed: Optional[int] = None, device: str = "cpu") -> Tensor:
     """

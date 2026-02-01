@@ -13,19 +13,31 @@ if HAS_TRITON:
         Q_ptr,          # Output quantized [M, block_size]  
         Err_ptr,        # Output errors [M, block_size]
         Hinv_ptr,       # Inverse Hessian block [block_size, block_size]
-        scale,          # Quantization scale (scalar)
+        scale_ptr,      # Quantization scale (scalar or vector [M, 1])
         M,
         BLOCK_SIZE: tl.constexpr,
         stride_wm, stride_wn,
         stride_qm, stride_qn,
         stride_em, stride_en,
         stride_hm, stride_hn,
+        stride_sm,      # Stride for scale (0 for scalar)
+        IS_SCALAR: tl.constexpr,
+        DAMPING: tl.constexpr = 1e-12
     ):
         # Each program handles one row
         pid_m = tl.program_id(0)
         
         if pid_m >= M:
             return
+
+        # Load scale for this row
+        if IS_SCALAR:
+            scale = tl.load(scale_ptr)
+        else:
+            scale = tl.load(scale_ptr + pid_m * stride_sm)
+        
+        # Ensure scale is not zero to avoid NaN
+        scale = tl.maximum(tl.abs(scale), DAMPING)
 
         # Sequential processing within kernel for error compensation
         for j in range(BLOCK_SIZE):
@@ -45,21 +57,22 @@ if HAS_TRITON:
             q = tl.where(use_floor, q_floor, q_floor + 1.0)
             
             # Use INT8_SYMMETRIC_MAX (127) for symmetric quantization range
-            # Matching the main implementation in gptq_int8.py
             q = tl.maximum(tl.minimum(q, 127.0), -127.0)
             
             # Store quantized value
             tl.store(Q_ptr + pid_m * stride_qm + j * stride_qn, q.to(tl.int8))
             
-            # Load Hinv diagonal
+            # Load Hinv diagonal with damping for stability
             d = tl.load(Hinv_ptr + j * stride_hm + j * stride_hn)
-            err = (w - q * scale) / d
+            d = tl.maximum(tl.abs(d), DAMPING)
+            
+            # Use explicit FP32 for error calculation to prevent drift
+            err = (w.to(tl.float32) - q.to(tl.float32) * scale.to(tl.float32)) / d.to(tl.float32)
             
             # Store error
             tl.store(Err_ptr + pid_m * stride_em + j * stride_en, err)
             
             # Update remaining columns in this row
-            # This is the sequential part that makes GPTQ hard to parallelize across columns
             for k in range(j + 1, BLOCK_SIZE):
                 h_jk = tl.load(Hinv_ptr + j * stride_hm + k * stride_hn)
                 w_k_ptr = W_ptr + pid_m * stride_wm + k * stride_wn
@@ -72,7 +85,7 @@ if HAS_TRITON:
         Launch Triton kernel for GPTQ block quantization.
         W: [M, block_size] (modified in-place)
         Hinv: [block_size, block_size]
-        scale: float
+        scale: float or Tensor [M, 1]
         Returns: (Q, Err)
         """
         M, BLOCK_SIZE = W.shape
@@ -83,14 +96,29 @@ if HAS_TRITON:
         if not W.is_contiguous():
             W = W.contiguous()
         
+        # Handle scale (scalar or vector)
+        is_scalar = scale.numel() == 1
+        if is_scalar:
+            # If it's a tensor with 1 element, get the value
+            if isinstance(scale, torch.Tensor):
+                scale_val = scale.data
+            else:
+                scale_val = torch.tensor([float(scale)], device=W.device)
+            stride_sm = 0
+        else:
+            scale_val = scale
+            stride_sm = scale.stride(0)
+            
         grid = (M,)
         gptq_quant_block_kernel[grid](
-            W, Q, Err, Hinv, float(scale.data.item()),
+            W, Q, Err, Hinv, scale_val,
             M, BLOCK_SIZE,
             W.stride(0), W.stride(1),
             Q.stride(0), Q.stride(1),
             Err.stride(0), Err.stride(1),
             Hinv.stride(0), Hinv.stride(1),
+            stride_sm,
+            IS_SCALAR=is_scalar,
         )
         
         return Q, Err

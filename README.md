@@ -64,9 +64,11 @@ pip install -U "triton-windows<3.3"
 convert_to_quant -i model.safetensors --optimizer quip --comfy_quant
 ```
 
-> **Default Storage:** QuIP now stores weights in **transformed space** by default (`store_transformed=True`) for maximum numerical stability. This avoids numerical issues with the inverse Hadamard transform that can cause NaN values in the original-space re-quantization path. The stored weights include QuIP rotation matrices (`quip_s_u`, `quip_s_v`) and are dequantized on-the-fly during inference by compatible loaders.
+> **Default Format:** QuIP uses uses **tensor-wise scaling** by default (`--quip-requant-scheme tensor`) which produces standard `int8_tensorwise` format. This provides:
+> - Maximum compatibility with ComfyUI and standard inference pipelines
+> - Single global scale per weight matrix (scalar)
 >
-> **For standard loaders:** Use `--quip-no-store-transformed` to store weights in original space with a single global scale (may have numerical stability issues with some models).
+> **For potentially higher precision** (at the cost of compatibility): Use `--quip-requant-scheme block` to enable block-wise re-quantization.
 
 **QuIP with SmoothQuant for maximum accuracy (best for models with activation outliers, may reduce LoRA compatibility)**
 
@@ -116,8 +118,12 @@ Load the output `.safetensors` file in ComfyUI like any other model.
 
 | Format | Flag | Hardware | Notes |
 |--------|------|----------|-------|
-| INT8 (block-wise) | *(default)* | Any GPU / CPU | Good balance of quality/speed |
+| INT8 (tensor-wise) | `--optimizer quip` (default) | Any GPU / CPU | Standard W8A8, maximum compatibility |
+| INT8 (block-wise) | `--scaling-mode block` | Any GPU / CPU | Good balance of quality/speed |
+| INT8 (axis-wise) | `--scaling-mode axis` | Any GPU / CPU | Per-row scaling |
 | FP16 | `--fp16` | Any GPU / CPU | High precision fallback |
+
+**Recommended:** Use QuIP with tensor-wise scaling (`--optimizer quip`, default) for best compatibility and near-lossless quality.
 
 ---
 
@@ -261,10 +267,12 @@ convert_to_quant -i model.safetensors --dry-run create-template
 convert_to_quant -i model.safetensors --layer-config layers.json --comfy_quant
 ```
 
-### Scaling Modes
+### Scaling Modes (Non-QuIP Optimizers)
+
+For optimizers other than QuIP:
 
 ```bash
-# Block-wise scaling (default)
+# Block-wise scaling (default for learned rounding/GPTQ)
 convert_to_quant -i model.safetensors --scaling-mode block --block_size 128 --comfy_quant
 
 # Axis-wise (per-row) scaling
@@ -274,30 +282,47 @@ convert_to_quant -i model.safetensors --scaling-mode axis --comfy_quant
 convert_to_quant -i model.safetensors --scaling-mode tensor --comfy_quant
 ```
 
+**Note:** For QuIP optimizer, use `--quip-requant-scheme {tensor,block}` instead (see [QuIP Storage Options](#quip-storage-options) above).
+
 ### QuIP Storage Options
 
-By default, QuIP stores weights in **original space** with a single global scale for maximum compatibility:
+By default, QuIP stores weights in **original space** with a **single global scale** (tensor-wise) for maximum compatibility:
 
 ```bash
-# Default: Standard int8_tensorwise format (recommended)
+# Default: Standard int8_tensorwise format with tensor-wise scaling (recommended)
 convert_to_quant -i model.safetensors --optimizer quip --comfy_quant
 ```
 
-**Benefits of original space storage:**
-- Full compatibility with Z-Image, ComfyUI, and standard inference pipelines
-- Maximum inference performance (no inverse transform overhead)
+**Benefits of tensor-wise (default):**
+- Maximum compatibility with Z-Image, ComfyUI, and standard inference pipelines
+- Single scalar scale per weight matrix
+- No special loader requirements
 - Uses optimized hardware INT8 kernels
 
-For advanced use cases, you can store weights in **transformed space** (experimental):
+**Alternative: Block-wise re-quantization**
+
+For potentially higher precision (at the cost of producing `int8_blockwise` format):
 
 ```bash
-# Experimental: Store in transformed space (requires custom loader)
-convert_to_quant -i model.safetensors --optimizer quip --comfy_quant --quip-store-transformed
+# Block-wise re-quantization (may improve precision, less compatible)
+convert_to_quant -i model.safetensors --optimizer quip --comfy_quant --quip-requant-scheme block
 ```
 
-**When to use transformed storage:**
-- When implementing a custom loader that can apply inverse transforms during inference
-- For experimental research purposes
+**Comparison:**
+
+| Scheme | Format | Scale Type | Compatibility | Use Case |
+|--------|--------|------------|---------------|----------|
+| `tensor` (default) | `int8_tensorwise` | Scalar (1 value) | **Maximum** | **Recommended for all standard inference** |
+| `block` | `int8_blockwise` | 3D blocks | Limited | Potentially higher precision |
+
+**Experimental: Transformed space storage**
+
+For advanced use cases with custom loaders:
+
+```bash
+# Store in transformed space (requires custom loader with Hadamard support)
+convert_to_quant -i model.safetensors --optimizer quip --comfy_quant --quip-store-transformed
+```
 - Note: Not compatible with standard inference pipelines
 
 ### Memory-Efficient Loading

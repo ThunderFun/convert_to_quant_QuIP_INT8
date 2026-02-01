@@ -16,6 +16,8 @@ Environment Variables:
     QUIP_ASYNC_PREFETCH: Enable async layer prefetching ("1" or "0", default "1")
     QUIP_ASYNC_WORKERS: Number of async workers (default "1")
     QUIP_ASYNC_BATCH_SIZE: Layers per batch (default "1")
+    QUIP_OUTLIER_AWARE: Enable outlier-aware scaling ("1" or "0", default "1")
+    QUIP_OUTLIER_PERCENTILE: Percentile for scale calculation (default "1.0")
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -79,6 +81,10 @@ class OptimizationConfig:
     async_prefetch_workers: int = 1
     async_prefetch_batch_size: int = 1
     
+    # Outlier-aware scaling
+    enable_outlier_aware_scaling: bool = True
+    outlier_percentile: float = 1.0  # Default to 1.0 (disabled) for QuIP precision
+    
     def __post_init__(self):
         """Validate configuration values."""
         if self.pinned_pool_max_mb < 64:
@@ -93,6 +99,8 @@ class OptimizationConfig:
             raise ValueError(f"async_prefetch_workers must be >= 1, got {self.async_prefetch_workers}")
         if self.async_prefetch_batch_size < 1:
             raise ValueError(f"async_prefetch_batch_size must be >= 1, got {self.async_prefetch_batch_size}")
+        if not 0.5 <= self.outlier_percentile <= 1.0:
+            raise ValueError(f"outlier_percentile must be between 0.5 and 1.0, got {self.outlier_percentile}")
     
     @classmethod
     def from_env(cls) -> 'OptimizationConfig':
@@ -142,6 +150,8 @@ class OptimizationConfig:
             enable_async_prefetch=get_bool('QUIP_ASYNC_PREFETCH', '1'),
             async_prefetch_workers=get_int('QUIP_ASYNC_WORKERS', '1'),
             async_prefetch_batch_size=get_int('QUIP_ASYNC_BATCH_SIZE', '1'),
+            enable_outlier_aware_scaling=get_bool('QUIP_OUTLIER_AWARE', '1'),
+            outlier_percentile=get_float('QUIP_OUTLIER_PERCENTILE', '1.0'),
         )
     
     @classmethod
@@ -233,6 +243,8 @@ class OptimizationConfig:
             'enable_async_prefetch': self.enable_async_prefetch,
             'async_prefetch_workers': self.async_prefetch_workers,
             'async_prefetch_batch_size': self.async_prefetch_batch_size,
+            'enable_outlier_aware_scaling': self.enable_outlier_aware_scaling,
+            'outlier_percentile': self.outlier_percentile,
         }
     
     def __str__(self) -> str:
@@ -253,6 +265,8 @@ class OptimizationConfig:
             enabled.append("fp16_intermediates")
         if self.enable_async_prefetch:
             enabled.append(f"async_prefetch({self.async_prefetch_workers}w)")
+        if self.enable_outlier_aware_scaling:
+            enabled.append(f"outlier_aware({self.outlier_percentile})")
         
         return f"OptimizationConfig({', '.join(enabled)})"
 

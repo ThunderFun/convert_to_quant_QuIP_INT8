@@ -139,6 +139,8 @@ def convert_to_int8(
     quip_hadamard: bool = True,
     quip_seed: Optional[int] = None,
     quip_store_transformed: bool = False,
+    quip_requant_scheme: str = "tensor",
+    quip_requant_tensor_per_row: bool = True,
     quip_checkpointed: bool = False,
     quip_checkpoint_threshold: int = 8192,
     quip_checkpoint_segments: int = 4,
@@ -594,6 +596,8 @@ def convert_to_int8(
                 use_triton=gptq_turbo,
                 lazy_updates=gptq_fast,
                 store_transformed=quip_store_transformed,
+                requant_scheme=quip_requant_scheme,
+                requant_tensor_use_per_row_scale=quip_requant_tensor_per_row,
                 streaming_mode=streaming_mode,
                 streaming_thresholds=streaming_thresholds or {},
                 no_memory_limits=no_memory_limits,
@@ -675,11 +679,19 @@ def convert_to_int8(
             if is_int8:
                 # Determine scaling mode and format
                 if optimizer_type == "quip":
-                    # QuIP always uses tensor-wise scaling for the transformed weights
-                    comfy_quant_format = "int8_tensorwise"
-                    block_size_for_meta = None
-                    # QuIP uses .weight_scale for Tensorwise INT8 compatibility
+                    # QuIP now supports block-wise re-quantization for better LoRA compatibility
+                    # Check if the scale is block-wise (3D) or tensor-wise (scalar/1D)
+                    if dequant_s.dim() >= 3:
+                        comfy_quant_format = "int8_blockwise"
+                        block_size_for_meta = layer_block_size
+                        verbose(f"      QuIP: using {comfy_quant_format} (bs={block_size_for_meta})")
+                    else:
+                        comfy_quant_format = "int8_tensorwise"
+                        block_size_for_meta = None
+                        verbose(f"      QuIP: using {comfy_quant_format}")
+                    
                     scale_key = f"{base_name}.weight_scale"
+                    verbose(f"      [DEBUG] QuIP detected: forcing {comfy_quant_format} for ComfyUI")
                 elif converter.scaling_mode == "axis":
                     comfy_quant_format = "int8_axiswise"
                     block_size_for_meta = None
