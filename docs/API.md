@@ -37,8 +37,9 @@ convert_to_int8(
     layer_config: Optional[Dict[str, Any]] = None,
     layer_config_fullmatch: bool = False,
     low_memory: bool = False,
-    streaming: bool = False,
-    streaming_aggressive: bool = False,
+    streaming_mode: str = "balanced",
+    streaming_thresholds: Optional[Dict[str, Optional[int]]] = None,
+    no_memory_limits: bool = False,
     report_quality: bool = False,
     quality_threshold: float = 30.0,
     smoothquant: bool = False,
@@ -52,6 +53,11 @@ convert_to_int8(
     quip_hadamard: bool = True,
     quip_seed: Optional[int] = None,
     quip_store_transformed: bool = False,
+    quip_requant_scheme: str = "tensor",
+    quip_requant_tensor_per_row: bool = True,
+    quip_checkpointed: bool = False,
+    quip_checkpoint_threshold: int = 8192,
+    quip_checkpoint_segments: int = 4,
     merge_lora_path: Optional[str] = None,
     merge_lora_paths: Optional[List[str]] = None,
     merge_lora_scale: float = 1.0,
@@ -89,8 +95,9 @@ convert_to_int8(
 | `layer_config` | Dict | None | Layer-specific configuration dictionary |
 | `layer_config_fullmatch` | bool | False | Use fullmatch for layer config patterns |
 | `low_memory` | bool | False | Use low-memory streaming mode (forces CPU) |
-| `streaming` | bool | False | Use streaming mode with GPU calculations |
-| `streaming_aggressive` | bool | False | 2x higher GPU computation thresholds |
+| `streaming_mode` | str | `"balanced"` | Streaming mode: `"off"`, `"minimal"`, `"balanced"`, `"aggressive"`, `"auto"` |
+| `streaming_thresholds` | Dict | None | Manual overrides for streaming thresholds |
+| `no_memory_limits` | bool | False | Disable all memory limits and OOM prevention |
 | `report_quality` | bool | False | Output quality metrics (MSE, SQNR) |
 | `quality_threshold` | float | 30.0 | SQNR threshold for warnings in dB |
 | `smoothquant` | bool | False | Enable SmoothQuant preprocessing |
@@ -104,6 +111,11 @@ convert_to_int8(
 | `quip_hadamard` | bool | True | Use Hadamard transform for QuIP |
 | `quip_seed` | int | None | Seed for QuIP random matrices |
 | `quip_store_transformed` | bool | False | Store QuIP weights in transformed space |
+| `quip_requant_scheme` | str | `"tensor"` | Re-quantization scheme: `"tensor"` or `"block"` |
+| `quip_requant_tensor_per_row` | bool | True | Use per-row scales for tensor-wise re-quantization |
+| `quip_checkpointed` | bool | False | Enable checkpointed LDLQ quantization |
+| `quip_checkpoint_threshold` | int | 8192 | Dimension threshold for checkpointing |
+| `quip_checkpoint_segments` | int | 4 | Number of segments for checkpointing |
 | `merge_lora_path` | str | None | Path to LoRA file to merge before quantization |
 | `merge_lora_paths` | List[str] | None | Multiple LoRA files to merge |
 | `merge_lora_scale` | float | 1.0 | Scale factor for LoRA merging |
@@ -193,8 +205,14 @@ converter = QuIPInt8Converter(
     use_triton=False,
     lazy_updates=True,
     store_transformed=False,
-    streaming=False,
-    streaming_aggressive=False
+    requant_scheme="tensor",
+    requant_tensor_use_per_row_scale=True,
+    streaming_mode="balanced",
+    streaming_thresholds={},
+    no_memory_limits=False,
+    use_checkpointed_ldlq=False,
+    checkpointed_ldlq_threshold=8192,
+    checkpoint_segments=4
 )
 
 # Convert a weight tensor
@@ -218,8 +236,14 @@ q_tensor, scale, dequantized = converter.convert(
 | `use_triton` | bool | False | Use Triton kernels |
 | `lazy_updates` | bool | True | Use lazy weight updates |
 | `store_transformed` | bool | False | Store in transformed space |
-| `streaming` | bool | False | Enable streaming mode |
-| `streaming_aggressive` | bool | False | Aggressive streaming thresholds |
+| `requant_scheme` | str | `"tensor"` | Re-quantization scheme (`"tensor"`, `"block"`) |
+| `requant_tensor_use_per_row_scale` | bool | True | Use per-row scales for tensor-wise |
+| `streaming_mode` | str | `"balanced"` | Streaming mode tier |
+| `streaming_thresholds` | Dict | `{}` | Manual threshold overrides |
+| `no_memory_limits` | bool | False | Disable OOM protection |
+| `use_checkpointed_ldlq` | bool | False | Enable checkpointed LDLQ |
+| `checkpointed_ldlq_threshold` | int | 8192 | Threshold for checkpointing |
+| `checkpoint_segments` | int | 4 | Segments for checkpointing |
 
 ---
 

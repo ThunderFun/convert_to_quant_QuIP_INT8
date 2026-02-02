@@ -176,9 +176,12 @@ These flags keep certain layers in high precision (not quantized):
 | `--quip-hadamard` | True | Use Hadamard transform for QuIP |
 | `--quip-seed` | None | Seed for QuIP random orthogonal matrices |
 | `--quip-store-transformed` | False | Store QuIP weights in transformed space (experimental, requires custom loader) |
-| `--quip-checkpointed` | False | Enable checkpointed LDLQ quantization for 75-90% memory reduction on large layers |
-| `--quip-checkpoint-threshold` | `8192` | Dimension threshold to use checkpointed quantization |
-| `--quip-checkpoint-segments` | `4` | Number of segments for checkpointed quantization (higher = more memory savings but slower) |
+`--quip-checkpointed` | False | Enable checkpointed LDLQ quantization for 75-90% memory reduction on large layers |
+`--quip-checkpoint-threshold` | `8192` | Dimension threshold to use checkpointed quantization |
+`--quip-checkpoint-segments` | `4` | Number of segments for checkpointed quantization (higher = more memory savings but slower) |
+`--quip-requant-scheme` | `tensor` | Re-quantization scheme when storing in original space: `tensor` (max compatibility) or `block` (better precision) |
+`--quip-requant-tensor-per-row` | True | Use per-row (channel-wise) scales for tensor-wise re-quantization |
+`--no-quip-requant-tensor-per-row` | False | Use single global scale for tensor-wise re-quantization |
 
 **Note:** By default, QuIP stores weights in original space with a single global scale (`store_transformed=False`), ensuring full compatibility with standard inference pipelines including Z-Image and ComfyUI.
 
@@ -250,7 +253,22 @@ Merge LoRA weights into the base model before quantization:
 | `--lr-threshold-mode` | `rel` | Threshold mode: `rel` (relative) or `abs` (absolute) |
 | `--early-stop-loss` | `1e-8` | Early stopping loss threshold |
 | `--early-stop-lr` | `1e-10` | Early stopping learning rate threshold |
-| `--early-stop-stall` | `1000` | Early stopping stall threshold (iterations without improvement) |
+`--early-stop-stall` | `1000` | Early stopping stall threshold (iterations without improvement) |
+
+### Dry Run & Template Generation
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dry-run` | None | Dry run mode: `analyze` (show what would be done) or `create-template` (generate layer config) |
+
+### Editing Quantized Models
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--edit-quant` | False | Enable editing mode for existing quantized models |
+| `--remove-keys` | None | Comma-separated list of keys to remove from the model |
+| `--add-keys` | None | JSON string of keys/values to add to the model |
+| `--quant-filter` | None | Regex filter for layers to edit |
 
 ---
 

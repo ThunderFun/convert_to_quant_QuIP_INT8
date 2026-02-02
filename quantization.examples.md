@@ -190,6 +190,75 @@ convert_to_quant -i base_model.safetensors \
     --comfy_quant
 ```
 
+---
+
+## Memory-Efficient & Performance Options
+
+### Streaming Mode for Low VRAM
+
+Process large models on GPUs with limited VRAM by offloading heavy operations to CPU:
+
+```bash
+# Auto-detect best streaming settings based on available VRAM
+convert_to_quant -i large_model.safetensors --streaming-mode auto --comfy_quant
+
+# Aggressive streaming for <8GB VRAM GPUs
+convert_to_quant -i large_model.safetensors --streaming-mode aggressive --comfy_quant
+```
+
+### BF16 Compute for Speed
+
+Use BF16 precision for internal calculations on Ampere+ GPUs (RTX 30/40 series) to speed up quantization:
+
+```bash
+# Enable BF16 compute (auto mode uses BF16 for large tensors)
+convert_to_quant -i model.safetensors --bf16-compute auto --comfy_quant
+```
+
+### Checkpointed Quantization
+
+Extreme memory savings (75-90%) for very large layers (e.g., 16k+ dimensions) using gradient checkpointing-style recomputation:
+
+```bash
+# Enable checkpointed LDLQ for large layers
+convert_to_quant -i model.safetensors --optimizer quip --quip-checkpointed --comfy_quant
+```
+
+---
+
+## Advanced Utilities
+
+### Dry Run & Analysis
+
+Analyze a model before quantization to see which layers will be processed:
+
+```bash
+# Show analysis of layers and expected quantization formats
+convert_to_quant -i model.safetensors --dry-run analyze --flux2
+```
+
+### Layer Config Template Generation
+
+Generate a JSON template for fine-grained per-layer quantization control:
+
+```bash
+# Create a template JSON file based on the model structure
+convert_to_quant -i model.safetensors --dry-run create-template
+```
+
+### Editing Existing Quantized Models
+
+Modify metadata or remove/add tensors in an already quantized file:
+
+```bash
+# Remove specific tensors and update metadata
+convert_to_quant -i quantized_model.safetensors --edit-quant \
+    --remove-keys "layer1.weight_scale,layer2.weight_scale" \
+    --save-quant-metadata
+```
+
+---
+
 ### Benefits of Pre-Merging LoRAs
 
 1. **Single file deployment** - No separate LoRA loading needed at inference
